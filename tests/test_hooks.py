@@ -1,0 +1,68 @@
+"""Hook tests run only where torch loads (the GPU host / Kaggle). Skipped on the authoring
+box where torch can't load its DLLs (WinError 193)."""
+import pytest
+
+try:
+    import torch
+    from torch import nn
+except Exception:  # ImportError or OSError (broken DLLs)
+    pytest.skip("torch unavailable on this host", allow_module_level=True)
+
+from asw.models.hooks import ActivationCapture, Steerer
+
+
+class ToyBlock(nn.Module):
+    def forward(self, x):
+        return (x,)  # identity, tuple output like a decoder layer
+
+
+class ToyModel(nn.Module):
+    def __init__(self, n_layers=3, d=4):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList([ToyBlock() for _ in range(n_layers)])
+
+    def forward(self, x):
+        for layer in self.model.layers:
+            x = layer(x)[0]
+        return x
+
+
+def test_capture_terminal_token():
+    m = ToyModel()
+    x = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
+    with ActivationCapture(m, [0, 1], token_index=-1) as cap:
+        m(x)
+    a = cap.stacked(0)
+    assert a.shape == (2, 4)
+    assert torch.allclose(a, x[:, -1, :])
+
+
+def test_steerer_adds_vector_to_residual():
+    m = ToyModel()
+    x = torch.zeros(2, 3, 4)
+    v = torch.tensor([1.0, 0, 0, 0])
+    base = m(x)
+    with Steerer(m, {2: v}, alpha=2.0):
+        out = m(x)
+    assert torch.allclose(out - base, torch.tensor([2.0, 0, 0, 0]).expand_as(out))
+
+
+def test_steerer_row_mask_protects_benign_rows():
+    m = ToyModel()
+    x = torch.zeros(2, 3, 4)
+    v = torch.tensor([1.0, 0, 0, 0])
+    with Steerer(m, {2: v}, alpha=1.0, mask=torch.tensor([True, False])):
+        out = m(x)
+    assert torch.allclose(out[0], torch.tensor([1.0, 0, 0, 0]).expand(3, 4))  # steered
+    assert torch.allclose(out[1], torch.zeros(3, 4))                          # untouched
+
+
+def test_steerer_accepts_numpy_vector():
+    import numpy as np
+
+    m = ToyModel()
+    x = torch.zeros(1, 2, 4)
+    with Steerer(m, {2: np.array([0.0, 3.0, 0, 0], dtype="float32")}, alpha=1.0):
+        out = m(x)
+    assert torch.allclose(out, torch.tensor([0.0, 3.0, 0, 0]).expand(1, 2, 4))
