@@ -1,0 +1,14 @@
+_base_: ../base.yaml
+
+# Llama-3 family, weight-surgery (abliterated) recipe — the C1 recipe-split counterpart
+# to Dolphin's synthetic-SFT. HF id + steer_layers provisional; refined by WS2/WS3.
+model:
+  id: failspy/Meta-Llama-3-8B-Instruct-abliterated-v3
+  revision: main
+  family: llama-3
+  alignment: uncensored
+  recipe: abliterated
+  dtype: bfloat16
+  n_layers: 32
+  d_model: 4096
+  steer_layers: [13, 14, 15, 16]

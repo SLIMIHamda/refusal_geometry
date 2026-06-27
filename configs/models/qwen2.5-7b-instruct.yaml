@@ -1,0 +1,13 @@
+_base_: ../base.yaml
+
+# Qwen-2.5 family, aligned control. NOTE: Qwen-2.5 requires transformers>=4.43.
+model:
+  id: Qwen/Qwen2.5-7B-Instruct
+  revision: main
+  family: qwen-2.5
+  alignment: aligned
+  recipe: rlhf
+  dtype: bfloat16
+  n_layers: 28
+  d_model: 3584
+  steer_layers: [11, 12, 13, 14]   # provisional (~0.45 depth); refined by WS2

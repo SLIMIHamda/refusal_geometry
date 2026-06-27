@@ -35,6 +35,53 @@ def _selfcheck(args) -> int:
     return 0
 
 
+def _models_verify(args) -> int:
+    from ..models.loader import load_model, verify_model
+
+    cfg = load_config(args.config)
+    model, tok = load_model(cfg, quant=args.quant)
+    info = verify_model(model, tok, cfg)
+    for k, v in info.items():
+        print(f"[verify] {k:14s}: {v}")
+    if not info["deterministic"]:
+        print("[verify] WARNING: non-deterministic generation at T=0", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _eval(args) -> int:
+    from .. import db as dbm
+    from ..data.benchmarks import load_benchmark
+    from ..models.loader import load_model, model_commit_hash
+    from ..scorers.judge import HFClassifierJudge, RubricJudge
+    from .evaluate import evaluate_benchmark
+    from .generate import HFGenerator
+
+    cfg = load_config(args.config)
+    con = dbm.connect(cfg["paths"]["results_db"])
+    bench = load_benchmark(args.benchmark, data_dir=cfg["paths"]["data_dir"], limit=args.limit)
+    model, tok = load_model(cfg, quant=args.quant)
+    gen = HFGenerator(model, tok)
+    judges = {"rubric": RubricJudge()}
+    if args.hf_judge:
+        judges["hf_classifier"] = HFClassifierJudge()
+
+    seeds = args.seeds if args.seeds else cfg["seeds"]
+    for seed in seeds:
+        metrics = evaluate_benchmark(
+            con, generator=gen, benchmark=bench, model_id=cfg["model"]["id"],
+            config=cfg, seed=seed, judges=judges, decoding=cfg["decoding"],
+            results_dir=cfg["paths"]["results_dir"],
+            model_revision=cfg["model"].get("revision"),
+            model_hash=model_commit_hash(model),
+        )
+        for key, val in metrics.items():
+            if key.startswith("refusal_rate"):
+                print(f"[eval] seed={seed} {key} = {val['rate']:.3f} "
+                      f"CI=[{val['ci_lo']:.3f},{val['ci_hi']:.3f}] n={val['n']}")
+    return 0
+
+
 def _score(args) -> int:
     import pandas as pd
 
@@ -77,6 +124,20 @@ def main(argv=None) -> int:
     sc.add_argument("--seed", type=int, default=0)
     sc.add_argument("--dump", default=None)
     sc.set_defaults(func=_selfcheck)
+
+    mv = sub.add_parser("models-verify", help="load a model and check T=0 determinism (M1)")
+    mv.add_argument("--config", required=True)
+    mv.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
+    mv.set_defaults(func=_models_verify)
+
+    ev = sub.add_parser("eval", help="run a benchmark on a model over seeds")
+    ev.add_argument("--config", required=True)
+    ev.add_argument("--benchmark", required=True)
+    ev.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
+    ev.add_argument("--limit", type=int, default=None)
+    ev.add_argument("--seeds", type=int, nargs="*", default=None)
+    ev.add_argument("--hf-judge", action="store_true")
+    ev.set_defaults(func=_eval)
 
     so = sub.add_parser("score", help="dual-score a responses parquet")
     so.add_argument("--responses", required=True)

@@ -1,0 +1,16 @@
+_base_: ../base.yaml
+
+# 70B anti-alignment STRETCH point. Per the locked decision: measured in int8 on
+# 1xA100-80G, validated by the 8B bf16-vs-int8-vs-nf4 calibration gate. Report sign/class
+# for sure; magnitude only if the gate licenses it. NOT load-bearing (degrade to 14B).
+model:
+  id: cognitivecomputations/dolphin-2.9.1-llama-3-70b
+  revision: main
+  family: llama-3
+  alignment: uncensored
+  recipe: synthetic-sft
+  dtype: bfloat16          # compute dtype; weights loaded int8 via `quant`
+  quant: int8
+  n_layers: 80
+  d_model: 8192
+  steer_layers: [33, 34, 35, 36]   # provisional; refined by WS2

@@ -12,6 +12,7 @@ paths:
   results_db: results/runs.sqlite
   results_dir: results
   cache_dir: cache
+  data_dir: data
 
 scoring:
   refusal:
