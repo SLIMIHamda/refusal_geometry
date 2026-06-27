@@ -1,0 +1,11 @@
+# Normalize line endings to LF in the repo (Windows authoring + Linux GPU hosts).
+* text=auto eol=lf
+
+# Treat these as binary (no eol conversion, no diff noise).
+*.pdf   binary
+*.parquet binary
+*.sqlite  binary
+*.png   binary
+*.jpg   binary
+*.safetensors binary
+*.bin   binary

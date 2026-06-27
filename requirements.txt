@@ -1,0 +1,20 @@
+# ── GPU stack: pinned to the thesis env (use on Kaggle/RunPod hosts, Python 3.10) ──
+# torch==2.2.0            # install the +cu121 wheel on GPU hosts
+# transformers==4.40.0    # Llama-3 / Mistral OK at this pin.
+#   FLAG: Qwen-2.5 requires transformers>=4.43. Keep TWO locked envs, or bump the
+#   whole zoo to transformers==4.44.2 and re-pin after a sign-stability re-check on
+#   Dolphin-8B (verify d_refuse sign/magnitude is unchanged vs 4.40.0 before trusting).
+# accelerate==0.29.3
+# bitsandbytes==0.43.1    # only for the 70B nf4 point (geometry sign, not magnitude)
+
+# ── Tracking spine + harness (CPU-friendly; runs on the authoring box) ──
+pyyaml==6.0.1
+pandas==2.2.2
+pyarrow==16.1.0
+
+# ── Scoring / stats ──
+scipy==1.13.1             # Clopper-Pearson exact CI + paired Wilcoxon/t tests
+scikit-learn==1.4.2       # RoBERTa-classifier utils + Cohen's kappa agreement
+
+# ── Dev ──
+pytest==8.2.0

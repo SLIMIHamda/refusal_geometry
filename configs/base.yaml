@@ -1,0 +1,25 @@
+# Global defaults inherited by every experiment/model config via `_base_`.
+project: refusal-geometry
+
+# Statistical rigor (Briefing 1, Axis C): >=3 seeds, both decode temps.
+seeds: [0, 1, 2]
+decoding:
+  temperatures: [0.0, 0.7]
+  max_new_tokens: 256
+  top_p: 1.0
+
+paths:
+  results_db: results/runs.sqlite
+  results_dir: results
+  cache_dir: cache
+
+scoring:
+  refusal:
+    prefix_window: 320
+
+# AdvBench splits inherited from the thesis (locked facts).
+splits:
+  advbench:
+    extract: [0, 200]
+    eval: [200, 300]
+    projection: [300, 340]

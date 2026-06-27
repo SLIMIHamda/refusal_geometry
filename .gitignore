@@ -1,0 +1,27 @@
+# results + caches are DVC-tracked, not committed raw
+results/
+cache/
+*.parquet
+*.sqlite
+*.sqlite-journal
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# models / weights (never committed)
+*.safetensors
+*.bin
+
+# Claude Code local settings (machine/user-specific)
+.claude/
+
+# internal planning docs — never in the repo (kept locally as reference only)
+*.pdf
+
+# keep configs tracked
+!configs/**
