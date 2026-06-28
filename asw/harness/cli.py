@@ -393,7 +393,7 @@ def main(argv=None) -> int:
 
     fc = sub.add_parser("fit-condition", help="fit the harmful-input condition vector (C4)")
     fc.add_argument("--config", required=True)
-    fc.add_argument("--benign", default="alpacaeval", help="benign benchmark for the negatives")
+    fc.add_argument("--benign", default="orbench", help="benign benchmark for the negatives")
     fc.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
     fc.set_defaults(func=_fit_condition)
 
