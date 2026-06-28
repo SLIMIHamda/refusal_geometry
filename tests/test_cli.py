@@ -1,6 +1,8 @@
 import pytest
 
-from asw.harness.cli import _build_generator, _condition_layer, _drefuse_path
+from asw.harness.cli import (
+    _ablation_points, _build_generator, _condition_layer, _drefuse_path,
+)
 
 
 def _cfg(tmp):
@@ -35,3 +37,27 @@ def test_build_generator_cast_requires_condition(tmp_path):
 
 def test_condition_layer_default():
     assert _condition_layer({"model": {"steer_layers": [13, 14, 15, 16]}}) == 15
+
+
+def test_ablation_points_alpha():
+    pts = _ablation_points("alpha", alpha=8.0, alphas=[2, 8], layer_sets=[])
+    assert [lbl for lbl, _ in pts] == ["alpha=2", "alpha=8"]
+    assert pts[1][1] == {"alpha": 8}
+
+
+def test_ablation_points_condition():
+    pts = _ablation_points("condition", alpha=8.0, alphas=[], layer_sets=[])
+    assert [lbl for lbl, _ in pts] == ["cond=on", "cond=off"]
+    assert pts[0][1] == {"alpha": 8.0, "use_condition": True}
+    assert pts[1][1]["use_condition"] is False
+
+
+def test_ablation_points_layers():
+    pts = _ablation_points("layers", alpha=8.0, alphas=[], layer_sets=[[13, 14], [13, 14, 15, 16]])
+    assert pts[0][0] == "layers=13,14"
+    assert pts[1][1] == {"alpha": 8.0, "layers": [13, 14, 15, 16]}
+
+
+def test_ablation_points_bad_axis():
+    with pytest.raises(SystemExit):
+        _ablation_points("nonsense", alpha=8.0, alphas=[], layer_sets=[])

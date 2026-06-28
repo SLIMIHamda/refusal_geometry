@@ -200,15 +200,50 @@ def _build_generator(cfg, model, tok, defense, alpha):
         from ..baselines.defenses import cast_baseline
         return cast_baseline(model, tok, d, alpha, cond, cl)
     if defense == "wrapper":
-        from ..wrapper.wrapper import Wrapper
-        lp = _geometry_labels_path(cfg)
-        if not lp.exists():
-            raise SystemExit(f"wrapper needs geometry labels; run `asw geometry-map` first ({lp})")
-        labels = json.loads(lp.read_text(encoding="utf-8"))
-        amap = {int(k): {"label": v} for k, v in labels.items()}
-        return Wrapper.from_geometry_map(model, tok, d, amap, alpha,
-                                         condition=cond, condition_layer=cl)
+        return _build_wrapper(cfg, model, tok, d, alpha)
     raise SystemExit(f"unknown defense '{defense}'")
+
+
+def _load_geometry_amap(cfg):
+    lp = _geometry_labels_path(cfg)
+    if not lp.exists():
+        raise SystemExit(f"need geometry labels; run `asw geometry-map` first ({lp})")
+    labels = json.loads(lp.read_text(encoding="utf-8"))
+    return {int(k): {"label": v} for k, v in labels.items()}
+
+
+def _build_wrapper(cfg, model, tok, d, alpha, *, layers=None, use_condition=True):
+    """The geometry-aware wrapper, with optional layer-band restriction and condition toggle
+    (the two ablation knobs beyond alpha)."""
+    from ..wrapper.condition import ConditionVector
+    from ..wrapper.wrapper import Wrapper
+
+    amap = _load_geometry_amap(cfg)
+    if layers is not None:
+        layers = set(layers)
+        d = {l: v for l, v in d.items() if l in layers}
+        amap = {l: v for l, v in amap.items() if l in layers}
+    cond = cl = None
+    if use_condition:
+        cp = _condition_path(cfg)
+        if not cp.exists():
+            raise SystemExit(f"wrapper needs the condition vector; run `asw fit-condition` ({cp})")
+        cond, cl = ConditionVector.load(cp), _condition_layer(cfg)
+    return Wrapper.from_geometry_map(model, tok, d, amap, alpha,
+                                     condition=cond, condition_layer=cl)
+
+
+def _ablation_points(axis, *, alpha, alphas, layer_sets):
+    """One ablation axis -> [(label, build_kwargs)] for _build_wrapper. Pure/testable."""
+    if axis == "alpha":
+        return [(f"alpha={a:g}", {"alpha": a}) for a in alphas]
+    if axis == "condition":
+        return [("cond=on", {"alpha": alpha, "use_condition": True}),
+                ("cond=off", {"alpha": alpha, "use_condition": False})]
+    if axis == "layers":
+        return [("layers=" + ",".join(map(str, ls)), {"alpha": alpha, "layers": list(ls)})
+                for ls in layer_sets]
+    raise SystemExit(f"unknown ablation axis '{axis}'")
 
 
 def _eval(args) -> int:
@@ -244,6 +279,48 @@ def _eval(args) -> int:
             if key.startswith("refusal_rate"):
                 print(f"[eval] seed={seed} {key} = {val['rate']:.3f} "
                       f"CI=[{val['ci_lo']:.3f},{val['ci_hi']:.3f}] n={val['n']}")
+    return 0
+
+
+def _ablate(args) -> int:
+    from .. import db as dbm
+    from ..data.benchmarks import load_benchmark
+    from ..geometry.extract import load_drefuse
+    from ..models.loader import load_model, model_commit_hash
+    from ..scorers.judge import HFClassifierJudge, RubricJudge
+    from .evaluate import evaluate_benchmark
+
+    cfg = load_config(args.config)
+    con = dbm.connect(cfg["paths"]["results_db"])
+    bench = load_benchmark(args.benchmark, data_dir=cfg["paths"]["data_dir"], limit=args.limit)
+    dp = _drefuse_path(cfg)
+    if not dp.exists():
+        raise SystemExit(f"ablation needs d_refuse; run `asw extract` first ({dp})")
+    model, tok = load_model(cfg, quant=args.quant)
+    d = load_drefuse(dp)
+    mh = model_commit_hash(model)
+    layer_sets = [[int(x) for x in s.split(",")] for s in (args.layer_sets or [])]
+    points = _ablation_points(args.axis, alpha=args.alpha, alphas=args.alphas,
+                              layer_sets=layer_sets)
+    judges = {"rubric": RubricJudge()}
+    if args.hf_judge:
+        judges["hf_classifier"] = HFClassifierJudge()
+    seeds = args.seeds if args.seeds else cfg["seeds"]
+    print(f"[ablate] axis={args.axis} points={len(points)} seeds={seeds}")
+    for label, kw in points:
+        gen = _build_wrapper(cfg, model, tok, d, **kw)
+        acfg = {**cfg, "ablation": {"axis": args.axis, "point": label, **kw}}
+        for seed in seeds:
+            metrics = evaluate_benchmark(
+                con, generator=gen, benchmark=bench, model_id=cfg["model"]["id"],
+                config=acfg, seed=seed, judges=judges, decoding=cfg["decoding"],
+                results_dir=cfg["paths"]["results_dir"],
+                model_revision=cfg["model"].get("revision"), model_hash=mh,
+                experiment_tag=f"ablate-{args.axis}:{label}")
+            for key, val in metrics.items():
+                if key.startswith("refusal_rate"):
+                    print(f"[ablate] {label:18s} seed={seed} {key}={val['rate']:.3f} "
+                          f"CI=[{val['ci_lo']:.3f},{val['ci_hi']:.3f}]")
     return 0
 
 
@@ -327,6 +404,20 @@ def main(argv=None) -> int:
     ev.add_argument("--seeds", type=int, nargs="*", default=None)
     ev.add_argument("--hf-judge", action="store_true")
     ev.set_defaults(func=_eval)
+
+    ab = sub.add_parser("ablate", help="sweep one wrapper ablation axis (C4 ablations)")
+    ab.add_argument("--config", required=True)
+    ab.add_argument("--benchmark", required=True)
+    ab.add_argument("--axis", required=True, choices=["alpha", "layers", "condition"])
+    ab.add_argument("--alpha", type=float, default=8.0, help="fixed alpha for layers/condition axes")
+    ab.add_argument("--alphas", type=float, nargs="*", default=[2, 4, 8, 16])
+    ab.add_argument("--layer-sets", nargs="*", default=None,
+                    help='for --axis layers, e.g. "13,14" "13,14,15,16"')
+    ab.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
+    ab.add_argument("--limit", type=int, default=None)
+    ab.add_argument("--seeds", type=int, nargs="*", default=None)
+    ab.add_argument("--hf-judge", action="store_true")
+    ab.set_defaults(func=_ablate)
 
     so = sub.add_parser("score", help="dual-score a responses parquet")
     so.add_argument("--responses", required=True)
