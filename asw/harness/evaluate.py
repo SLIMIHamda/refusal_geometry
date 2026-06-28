@@ -27,9 +27,16 @@ def evaluate_benchmark(
     results_dir: str | Path = "results",
     model_revision: str | None = None,
     model_hash: str | None = None,
+    experiment_tag: str | None = None,
 ) -> dict:
-    """Run one (benchmark, model, config, seed) evaluation unit. Returns metrics."""
+    """Run one (benchmark, model, config, seed) evaluation unit. Returns metrics.
+
+    `experiment_tag` (e.g. a defense name) is appended to the experiment id so runs of the
+    same benchmark under different defenses live in distinct manifest rows / parquet dirs.
+    """
     experiment = f"eval:{benchmark.name}"
+    if experiment_tag:
+        experiment = f"{experiment}:{experiment_tag}"
     with run_context(
         con, experiment=experiment, model_id=model_id, config=config, seed=seed,
         model_revision=model_revision, model_hash=model_hash,

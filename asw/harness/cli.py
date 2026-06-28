@@ -42,6 +42,26 @@ def _drefuse_path(cfg):
             / f"{dbm.safe_name(cfg['model']['id'])}.npz")
 
 
+def _condition_path(cfg):
+    from .. import db as dbm
+
+    return (Path(cfg["paths"]["cache_dir"]) / "condition"
+            / f"{dbm.safe_name(cfg['model']['id'])}.npz")
+
+
+def _geometry_labels_path(cfg):
+    from .. import db as dbm
+
+    return (Path(cfg["paths"]["cache_dir"]) / "geometry"
+            / f"{dbm.safe_name(cfg['model']['id'])}.json")
+
+
+def _condition_layer(cfg):
+    """Layer the harmful-input detector reads. Configurable; default = mid steering band."""
+    sl = cfg["model"]["steer_layers"]
+    return cfg["model"].get("condition_layer", sl[len(sl) // 2])
+
+
 def _split(bench, cfg, which):
     lo, hi = cfg["splits"]["advbench"][which]
     return bench.prompts()[lo:hi]
@@ -95,6 +115,10 @@ def _geometry_map(args) -> int:
                      config=cfg, seed=0, model_hash=model_commit_hash(model)) as h:
         amap = anti_alignment_map(model, tok, prompts, d)
         h["metrics"] = {f"layer_{l}": v for l, v in amap.items()}
+        lp = _geometry_labels_path(cfg)
+        lp.parent.mkdir(parents=True, exist_ok=True)
+        lp.write_text(json.dumps({str(l): v["label"] for l, v in amap.items()}, indent=2),
+                      encoding="utf-8")
     for l in sorted(amap):
         v = amap[l]
         print(f"[geometry] layer {l:2d}: <y,d>={v['mean']:+.3f} "
@@ -116,23 +140,97 @@ def _models_verify(args) -> int:
     return 0
 
 
+def _fit_condition(args) -> int:
+    from .. import db as dbm
+    from ..data.benchmarks import load_benchmark
+    from ..geometry.extract import capture_terminal
+    from ..models.loader import load_model, model_commit_hash
+    from ..runlog import run_context
+    from ..wrapper.condition import ConditionVector
+
+    cfg = load_config(args.config)
+    con = dbm.connect(cfg["paths"]["results_db"])
+    cl = _condition_layer(cfg)
+    harmful = _split(load_benchmark("advbench", data_dir=cfg["paths"]["data_dir"]), cfg, "extract")
+    benign = load_benchmark(args.benign, data_dir=cfg["paths"]["data_dir"],
+                            limit=len(harmful)).prompts()
+    model, tok = load_model(cfg, quant=args.quant)
+    with run_context(con, experiment="fit-condition", model_id=cfg["model"]["id"],
+                     config=cfg, seed=0, model_hash=model_commit_hash(model)) as h:
+        ha = capture_terminal(model, tok, harmful, [cl])[cl]
+        ba = capture_terminal(model, tok, benign, [cl])[cl]
+        cv = ConditionVector.fit(ha, ba)
+        path = _condition_path(cfg)
+        cv.save(path)
+        acc = 0.5 * float(cv.predict(ha).mean()) + 0.5 * float((~cv.predict(ba)).mean())
+        h["metrics"] = {"condition_layer": cl, "train_sep_acc": acc,
+                        "n_harmful": len(harmful), "n_benign": len(benign), "cache": str(path)}
+    print(f"[fit-condition] layer {cl}: train separation acc={acc:.3f} -> {path}")
+    return 0
+
+
+def _build_generator(cfg, model, tok, defense, alpha):
+    """Construct the Generator for a chosen defense, loading cached artifacts as needed."""
+    from .generate import HFGenerator
+
+    if defense in (None, "none"):
+        return HFGenerator(model, tok)
+    if defense == "system_prompt":
+        from ..baselines.defenses import system_prompt_defense
+        return system_prompt_defense(model, tok)
+
+    from ..geometry.extract import load_drefuse
+    dp = _drefuse_path(cfg)
+    if not dp.exists():
+        raise SystemExit(f"defense '{defense}' needs d_refuse; run `asw extract` first ({dp})")
+    d = load_drefuse(dp)
+
+    if defense == "abliteration":
+        from ..baselines.defenses import abliteration_reversal
+        return abliteration_reversal(model, tok, d, alpha)
+
+    cp = _condition_path(cfg)
+    if not cp.exists():
+        raise SystemExit(f"defense '{defense}' needs the condition vector; run "
+                         f"`asw fit-condition` first ({cp})")
+    from ..wrapper.condition import ConditionVector
+    cond, cl = ConditionVector.load(cp), _condition_layer(cfg)
+
+    if defense == "cast":
+        from ..baselines.defenses import cast_baseline
+        return cast_baseline(model, tok, d, alpha, cond, cl)
+    if defense == "wrapper":
+        from ..wrapper.wrapper import Wrapper
+        lp = _geometry_labels_path(cfg)
+        if not lp.exists():
+            raise SystemExit(f"wrapper needs geometry labels; run `asw geometry-map` first ({lp})")
+        labels = json.loads(lp.read_text(encoding="utf-8"))
+        amap = {int(k): {"label": v} for k, v in labels.items()}
+        return Wrapper.from_geometry_map(model, tok, d, amap, alpha,
+                                         condition=cond, condition_layer=cl)
+    raise SystemExit(f"unknown defense '{defense}'")
+
+
 def _eval(args) -> int:
     from .. import db as dbm
     from ..data.benchmarks import load_benchmark
     from ..models.loader import load_model, model_commit_hash
     from ..scorers.judge import HFClassifierJudge, RubricJudge
     from .evaluate import evaluate_benchmark
-    from .generate import HFGenerator
 
     cfg = load_config(args.config)
     con = dbm.connect(cfg["paths"]["results_db"])
     bench = load_benchmark(args.benchmark, data_dir=cfg["paths"]["data_dir"], limit=args.limit)
     model, tok = load_model(cfg, quant=args.quant)
-    gen = HFGenerator(model, tok)
+    gen = _build_generator(cfg, model, tok, args.defense, args.alpha)
+    # fold the defense into the config so its hash (manifest) distinguishes the run
+    if args.defense and args.defense != "none":
+        cfg = {**cfg, "defense": {"kind": args.defense, "alpha": args.alpha}}
     judges = {"rubric": RubricJudge()}
     if args.hf_judge:
         judges["hf_classifier"] = HFClassifierJudge()
 
+    tag = args.defense if args.defense and args.defense != "none" else None
     seeds = args.seeds if args.seeds else cfg["seeds"]
     for seed in seeds:
         metrics = evaluate_benchmark(
@@ -140,7 +238,7 @@ def _eval(args) -> int:
             config=cfg, seed=seed, judges=judges, decoding=cfg["decoding"],
             results_dir=cfg["paths"]["results_dir"],
             model_revision=cfg["model"].get("revision"),
-            model_hash=model_commit_hash(model),
+            model_hash=model_commit_hash(model), experiment_tag=tag,
         )
         for key, val in metrics.items():
             if key.startswith("refusal_rate"):
@@ -206,6 +304,12 @@ def main(argv=None) -> int:
     gm.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
     gm.set_defaults(func=_geometry_map)
 
+    fc = sub.add_parser("fit-condition", help="fit the harmful-input condition vector (C4)")
+    fc.add_argument("--config", required=True)
+    fc.add_argument("--benign", default="alpacaeval", help="benign benchmark for the negatives")
+    fc.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
+    fc.set_defaults(func=_fit_condition)
+
     mv = sub.add_parser("models-verify", help="load a model and check T=0 determinism (M1)")
     mv.add_argument("--config", required=True)
     mv.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
@@ -214,6 +318,10 @@ def main(argv=None) -> int:
     ev = sub.add_parser("eval", help="run a benchmark on a model over seeds")
     ev.add_argument("--config", required=True)
     ev.add_argument("--benchmark", required=True)
+    ev.add_argument("--defense", default="none",
+                    choices=["none", "system_prompt", "abliteration", "cast", "wrapper"],
+                    help="defense/generator to evaluate (default: undefended model)")
+    ev.add_argument("--alpha", type=float, default=8.0, help="steering strength (steered defenses)")
     ev.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
     ev.add_argument("--limit", type=int, default=None)
     ev.add_argument("--seeds", type=int, nargs="*", default=None)
