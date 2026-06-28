@@ -324,6 +324,16 @@ def _ablate(args) -> int:
     return 0
 
 
+def _report(args) -> int:
+    from ..report.build import build_report
+
+    cfg = load_config(args.config)
+    out = build_report(cfg["paths"]["results_db"], args.out,
+                       judge=args.judge, temperature=args.temperature)
+    print(f"[report] wrote {out / 'REPORT.md'} (+ tables/ + figures/)")
+    return 0
+
+
 def _score(args) -> int:
     import pandas as pd
 
@@ -418,6 +428,13 @@ def main(argv=None) -> int:
     ab.add_argument("--seeds", type=int, nargs="*", default=None)
     ab.add_argument("--hf-judge", action="store_true")
     ab.set_defaults(func=_ablate)
+
+    rp = sub.add_parser("report", help="regenerate all tables + figures from runs.sqlite (M5)")
+    rp.add_argument("--config", required=True)
+    rp.add_argument("--out", default="report")
+    rp.add_argument("--judge", default="rubric")
+    rp.add_argument("--temperature", type=float, default=0.0)
+    rp.set_defaults(func=_report)
 
     so = sub.add_parser("score", help="dual-score a responses parquet")
     so.add_argument("--responses", required=True)
