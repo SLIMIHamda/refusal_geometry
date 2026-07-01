@@ -8,7 +8,7 @@ try:
 except Exception:  # ImportError or OSError (broken DLLs)
     pytest.skip("torch unavailable on this host", allow_module_level=True)
 
-from asw.models.hooks import ActivationCapture, Steerer
+from asw.models.hooks import Ablator, ActivationCapture, Steerer
 
 
 class ToyBlock(nn.Module):
@@ -66,3 +66,24 @@ def test_steerer_accepts_numpy_vector():
     with Steerer(m, {2: np.array([0.0, 3.0, 0, 0], dtype="float32")}, alpha=1.0):
         out = m(x)
     assert torch.allclose(out, torch.tensor([0.0, 3.0, 0, 0]).expand(1, 2, 4))
+
+
+def test_ablator_removes_direction_component():
+    m = ToyModel()
+    x = torch.zeros(1, 2, 4)
+    x[..., 0] = 3.0   # component along d
+    x[..., 1] = 5.0   # orthogonal component
+    with Ablator(m, {2: torch.tensor([2.0, 0, 0, 0])}):   # unit-normalised inside the hook
+        out = m(x)
+    assert torch.allclose(out[..., 0], torch.zeros(1, 2))          # d-component projected out
+    assert torch.allclose(out[..., 1], torch.full((1, 2), 5.0))    # orthogonal untouched
+
+
+def test_ablator_row_mask_protects_rows():
+    m = ToyModel()
+    x = torch.zeros(2, 2, 4)
+    x[..., 0] = 4.0
+    with Ablator(m, {2: torch.tensor([1.0, 0, 0, 0])}, mask=torch.tensor([True, False])):
+        out = m(x)
+    assert torch.allclose(out[0, :, 0], torch.zeros(2))            # ablated row
+    assert torch.allclose(out[1, :, 0], torch.full((2,), 4.0))     # untouched row

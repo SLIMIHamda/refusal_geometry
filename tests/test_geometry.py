@@ -1,7 +1,8 @@
 import numpy as np
 
 from asw.geometry.extract import (
-    cosine, layer_consistency, load_drefuse, mean_difference_direction, save_drefuse,
+    cosine, layer_consistency, load_drefuse, mean_difference_direction, min_pairwise_cosine,
+    naive_dim_direction, save_drefuse,
 )
 from asw.geometry.projection import classify_geometry, projections
 
@@ -12,6 +13,21 @@ def test_direction_points_native_to_refusal():
     d = mean_difference_direction(native, refusal)
     assert np.allclose(d, [1, 0, 0, 0])
     assert abs(np.linalg.norm(d) - 1) < 1e-9
+
+
+def test_naive_dim_direction_points_harmless_to_harmful():
+    harmless = np.tile([-2.0, 0, 0, 0], (6, 1))
+    harmful = np.tile([3.0, 0, 0, 0], (6, 1))
+    d = naive_dim_direction(harmful, harmless)
+    assert np.allclose(d, [1, 0, 0, 0]) and abs(np.linalg.norm(d) - 1) < 1e-9
+
+
+def test_min_pairwise_cosine():
+    x, y = [1.0, 0], [0.0, 1.0]
+    assert abs(min_pairwise_cosine([x, x, x]) - 1.0) < 1e-9   # identical -> 1
+    assert abs(min_pairwise_cosine([x, y])) < 1e-9            # orthogonal -> 0
+    assert abs(min_pairwise_cosine([x, x, y]) - 0.0) < 1e-9   # min over pairs picks the 0
+    assert np.isnan(min_pairwise_cosine([x]))                 # <2 dirs -> nan
 
 
 def test_cosine():

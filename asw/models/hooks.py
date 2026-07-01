@@ -127,6 +127,47 @@ class Steerer:
         return False
 
 
+class Ablator:
+    """Project a direction OUT of the residual stream at each layer: h <- h - (h . d_hat) d_hat.
+
+    Ablating d_refuse at the band layers is the necessary-condition test for construct validity
+    (Item 2): if d_refuse is *the* refusal direction, removing it should collapse refusal on an
+    aligned model. Mirrors Steerer (numpy-or-tensor vectors, optional per-row mask, registered
+    after dispatch, device/dtype-safe); the vector is unit-normalised inside the hook.
+    """
+
+    def __init__(self, model, vectors: dict, site: str = "block", mask: "torch.Tensor | None" = None):
+        self.model = model
+        self.vectors = vectors
+        self.site = site
+        self.mask = mask
+        self._handles: list = []
+
+    def _make(self, vec):
+        def hook(_m, _i, out):
+            h = hidden_of(out)
+            v = torch.as_tensor(vec, device=h.device, dtype=h.dtype)
+            v = v / v.norm()
+            comp = (h * v).sum(dim=-1, keepdim=True)          # projection h . d_hat
+            delta = comp * v
+            if self.mask is not None:
+                m = self.mask.to(h.device).view(-1, *([1] * (h.dim() - 1))).to(h.dtype)
+                delta = delta * m
+            return repack(out, h - delta)
+        return hook
+
+    def __enter__(self):
+        for l, vec in self.vectors.items():
+            self._handles.append(get_module(self.model, l, self.site).register_forward_hook(self._make(vec)))
+        return self
+
+    def __exit__(self, *exc):
+        for h in self._handles:
+            h.remove()
+        self._handles.clear()
+        return False
+
+
 @contextmanager
 def no_grad_eval(model):
     was_training = model.training

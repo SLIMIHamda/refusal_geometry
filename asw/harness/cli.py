@@ -169,6 +169,54 @@ def _fit_condition(args) -> int:
     return 0
 
 
+def _validate_drefuse(args) -> int:
+    """Construct-validity checks for d_refuse (Item 2). Intended on an ALIGNED model, where the
+    ablation necessary-condition test (refusal collapses when d_refuse is projected out) is
+    meaningful."""
+    import numpy as np
+
+    from .. import db as dbm
+    from ..data.benchmarks import load_benchmark
+    from ..geometry.extract import load_drefuse
+    from ..geometry.validate import run_validation
+    from ..models.loader import load_model, model_commit_hash
+    from ..runlog import run_context
+    from ..scorers.judge import RubricJudge
+
+    cfg = load_config(args.config)
+    con = dbm.connect(cfg["paths"]["results_db"])
+    dp = _drefuse_path(cfg)
+    if not dp.exists():
+        raise SystemExit(f"validate-drefuse needs d_refuse; run `asw extract` first ({dp})")
+    d = load_drefuse(dp)
+    layers = [l for l in (args.layers or cfg["model"]["steer_layers"]) if l in d]
+    harmful = _split(load_benchmark("advbench", data_dir=cfg["paths"]["data_dir"]), cfg, "eval")
+    harmless = load_benchmark(args.benign, data_dir=cfg["paths"]["data_dir"],
+                              limit=len(harmful)).prompts()
+    threshold = cfg.get("validation", {}).get("ablation_drop_threshold", 0.40)
+    model, tok = load_model(cfg, quant=args.quant)
+    with run_context(con, experiment="validate-drefuse", model_id=cfg["model"]["id"],
+                     config=cfg, seed=0, model_hash=model_commit_hash(model)) as h:
+        m = run_validation(model, tok, d, harmful=harmful, harmless=harmless, layers=layers,
+                           judge=RubricJudge(), decoding=cfg["decoding"], threshold=threshold)
+        h["metrics"] = m
+    ab = m["ablation"]
+    print(f"[validate] ablation: refusal {ab['refusal_base']:.3f} -> {ab['refusal_ablated']:.3f} "
+          f"(drop {ab['refusal_drop']:+.3f} vs threshold {ab['threshold']:.2f})  "
+          f"{'PASS' if ab['passes'] else 'FAIL'}")
+    print(f"[validate] template stability : min pairwise cos = {m['template_stability_min']:+.3f}")
+    if m["natural_refusal_cos"]:
+        mn = float(np.mean([v for v in m["natural_refusal_cos"].values()]))
+        print(f"[validate] natural-refusal    : mean cos(d_forced, d_natural) = {mn:+.3f} "
+              f"({m['natural_refusal_counts']})")
+    else:
+        print(f"[validate] natural-refusal    : too few spontaneous refusals/complies "
+              f"({m['natural_refusal_counts']})")
+    vn = float(np.mean([v for v in m["behavioral_vs_naive_cos"].values()]))
+    print(f"[validate] behavioral vs naive : mean cos = {vn:+.3f}")
+    return 0
+
+
 def _build_generator(cfg, model, tok, defense, alpha):
     """Construct the Generator for a chosen defense, loading cached artifacts as needed."""
     from .generate import HFGenerator
@@ -396,6 +444,15 @@ def main(argv=None) -> int:
     fc.add_argument("--benign", default="orbench", help="benign benchmark for the negatives")
     fc.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
     fc.set_defaults(func=_fit_condition)
+
+    vd = sub.add_parser("validate-drefuse",
+                        help="construct-validity checks for d_refuse: ablation, template, "
+                             "natural-refusal, naive-DIM (Item 2; run on an aligned model)")
+    vd.add_argument("--config", required=True)
+    vd.add_argument("--benign", default="orbench", help="harmless set for the naive-DIM contrast")
+    vd.add_argument("--layers", type=int, nargs="*", default=None)
+    vd.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
+    vd.set_defaults(func=_validate_drefuse)
 
     mv = sub.add_parser("models-verify", help="load a model and check T=0 determinism (M1)")
     mv.add_argument("--config", required=True)

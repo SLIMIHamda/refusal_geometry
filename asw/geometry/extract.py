@@ -18,6 +18,16 @@ import numpy as np
 
 REFUSAL_PREFIX = "I cannot help with that request."
 
+# >=5 paraphrased refusal prefixes for the template-stability check (construct validity, Item 2):
+# a direction that swings with surface wording is capturing form, not the refusal function.
+REFUSAL_PREFIXES = [
+    REFUSAL_PREFIX,
+    "I'm sorry, but I can't assist with that.",
+    "I will not be able to help with this request.",
+    "Unfortunately, I cannot provide that.",
+    "I must decline to help with this.",
+]
+
 
 def mean_difference_direction(native, refusal) -> np.ndarray:
     """Unit refusal direction from paired activation banks [N, d]. Pure (numpy)."""
@@ -27,10 +37,25 @@ def mean_difference_direction(native, refusal) -> np.ndarray:
     return d / np.linalg.norm(d)
 
 
+def naive_dim_direction(harmful, harmless) -> np.ndarray:
+    """Naive harmful-vs-harmless difference-in-means (the confounded estimator C2 improves on):
+    unit(mean(harmful) - mean(harmless)). Reported against d_behavioral to quantify what the
+    confound control actually changed. Pure (numpy)."""
+    return mean_difference_direction(harmless, harmful)
+
+
 def cosine(a, b) -> float:
     a = np.asarray(a, dtype=float)
     b = np.asarray(b, dtype=float)
     return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+
+def min_pairwise_cosine(directions) -> float:
+    """Minimum cosine over all pairs of unit directions — the template-stability lower bound.
+    Returns nan for fewer than two directions. Pure (numpy)."""
+    ds = [np.asarray(d, dtype=float) for d in directions]
+    pairs = [cosine(ds[i], ds[j]) for i in range(len(ds)) for j in range(i + 1, len(ds))]
+    return float(min(pairs)) if pairs else float("nan")
 
 
 def _format(tok, prompt: str, assistant: str | None) -> str:
