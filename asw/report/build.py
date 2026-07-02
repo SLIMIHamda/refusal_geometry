@@ -46,6 +46,9 @@ def build_report(db_path, out_dir, *, judge: str = "rubric", temperature=0.0) ->
     geo_fig = figures.fig_anti_alignment_map(geo, fdir / "anti_alignment_map.png")
     section("Anti-alignment map (C1)", geo, "geometry.csv", geo_fig)
 
+    # d_refuse construct validity (Item 2)
+    section("d_refuse construct validity (Item 2)", tables.table_validation(runs), "validation.csv")
+
     # main results — refusal rate by defense
     refusal = tables.table_refusal(runs, judge=judge, temperature=temperature)
     refusal_fig = None

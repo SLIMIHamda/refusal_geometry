@@ -67,13 +67,18 @@ def _format(tok, prompt: str, assistant: str | None) -> str:
 
 def capture_terminal(model, tok, prompts, layers, *, assistant=None, site="block",
                      batch_size=16) -> dict[int, np.ndarray]:
-    """Terminal-token residual activations per layer for `prompts` -> {layer: [N, d]} numpy."""
+    """Terminal-token residual activations per layer for `prompts` -> {layer: [N, d]} numpy.
+
+    `assistant` may be None, a single string (broadcast to every prompt), or a per-prompt list
+    (used to teacher-force each prompt's own natural refusal continuation, Item 2)."""
     from ..models.hooks import ActivationCapture, no_grad_eval
 
     layers = list(layers)
+    assistants = assistant if isinstance(assistant, (list, tuple)) else [assistant] * len(prompts)
     with ActivationCapture(model, layers, site=site, token_index=-1) as cap, no_grad_eval(model):
         for i in range(0, len(prompts), batch_size):
-            texts = [_format(tok, p, assistant) for p in prompts[i:i + batch_size]]
+            texts = [_format(tok, p, a)
+                     for p, a in zip(prompts[i:i + batch_size], assistants[i:i + batch_size])]
             enc = tok(texts, return_tensors="pt", padding=True, add_special_tokens=False)
             enc = {k: v.to(model.device) for k, v in enc.items()}
             model(**enc)

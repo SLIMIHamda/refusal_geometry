@@ -205,12 +205,19 @@ def _validate_drefuse(args) -> int:
           f"(drop {ab['refusal_drop']:+.3f} vs threshold {ab['threshold']:.2f})  "
           f"{'PASS' if ab['passes'] else 'FAIL'}")
     print(f"[validate] template stability : min pairwise cos = {m['template_stability_min']:+.3f}")
+    if m.get("natural_teacher_forced_cos"):
+        mt = float(np.mean([v for v in m["natural_teacher_forced_cos"].values()]))
+        print(f"[validate] teacher-forced     : mean cos(d_forced, d_tf) = {mt:+.3f} "
+              f"({m['natural_teacher_forced_counts']})")
+    else:
+        print(f"[validate] teacher-forced     : too few spontaneous refusals "
+              f"({m.get('natural_teacher_forced_counts')})")
     if m["natural_refusal_cos"]:
         mn = float(np.mean([v for v in m["natural_refusal_cos"].values()]))
-        print(f"[validate] natural-refusal    : mean cos(d_forced, d_natural) = {mn:+.3f} "
+        print(f"[validate] natural (DIM)      : mean cos(d_forced, d_natural) = {mn:+.3f} "
               f"({m['natural_refusal_counts']})")
     else:
-        print(f"[validate] natural-refusal    : too few spontaneous refusals/complies "
+        print(f"[validate] natural (DIM)      : too few spontaneous refusals/complies "
               f"({m['natural_refusal_counts']})")
     vn = float(np.mean([v for v in m["behavioral_vs_naive_cos"].values()]))
     print(f"[validate] behavioral vs naive : mean cos = {vn:+.3f}")

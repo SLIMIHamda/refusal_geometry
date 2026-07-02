@@ -84,6 +84,25 @@ def natural_refusal_direction(model, tok, prompts, layers, judge, decoding, min_
     return {l: mean_difference_direction(a_com[l], a_ref[l]) for l in layers}, counts
 
 
+def natural_teacher_forced(model, tok, prompts, layers, judge, decoding, min_group=5):
+    """Teacher-forcing bound: on the prompts the model spontaneously refuses, extract a direction
+    from its OWN natural refusal continuation (native vs teacher-forced-own-refusal), rather than
+    a canned prefix. High cos(d_forced, d_teacher_forced) means d_forced tracks the refusal
+    function, not the specific canned tokens — the tightest bound on the in-context confound.
+    Returns (dirs | None, counts)."""
+    resp = _generate(model, tok, prompts, decoding)
+    labels = judge.label_batch(prompts, resp)
+    refused = [(p, r) for p, r, l in zip(prompts, resp, labels) if l == "refusal"]
+    counts = {"n_refused": len(refused)}
+    if len(refused) < min_group:
+        return None, counts
+    rp = [p for p, _ in refused]
+    ra = [r for _, r in refused]
+    native = capture_terminal(model, tok, rp, layers, assistant=None)
+    forced = capture_terminal(model, tok, rp, layers, assistant=ra)   # per-prompt own refusal text
+    return {l: mean_difference_direction(native[l], forced[l]) for l in layers}, counts
+
+
 def behavioral_vs_naive(model, tok, harmful, harmless, layers, d_forced):
     """cos(d_behavioral, d_naive-DIM) per layer, over the same harmful/harmless prompt sets."""
     ah = capture_terminal(model, tok, harmful, layers, assistant=None)
@@ -103,6 +122,8 @@ def run_validation(model, tok, d_forced, *, harmful, harmless, layers, judge, de
     d_nat, nat_counts = natural_refusal_direction(model, tok, harmful + harmless, layers,
                                                   judge, decoding)
     natural = {l: cosine(d_forced[l], d_nat[l]) for l in layers} if d_nat else None
+    d_tf, tf_counts = natural_teacher_forced(model, tok, harmful, layers, judge, decoding)
+    natural_tf = {l: cosine(d_forced[l], d_tf[l]) for l in layers} if d_tf else None
     vs_naive = behavioral_vs_naive(model, tok, harmful, harmless, layers, d_forced)
 
     return {
@@ -111,6 +132,8 @@ def run_validation(model, tok, d_forced, *, harmful, harmless, layers, judge, de
         "template_stability_min": float(min(templ.values())),
         "natural_refusal_cos": ({str(l): v for l, v in natural.items()} if natural else None),
         "natural_refusal_counts": nat_counts,
+        "natural_teacher_forced_cos": ({str(l): v for l, v in natural_tf.items()} if natural_tf else None),
+        "natural_teacher_forced_counts": tf_counts,
         "behavioral_vs_naive_cos": {str(l): v for l, v in vs_naive.items()},
         "layers": layers,
     }

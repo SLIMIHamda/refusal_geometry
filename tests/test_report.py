@@ -122,6 +122,27 @@ def test_table_ablation_alpha(tmp_path):
     assert set(a["point"]) == {"alpha=2", "alpha=8"}
 
 
+def test_table_validation(tmp_path):
+    con = dbm.connect(tmp_path / "v.sqlite")
+    metrics = {
+        "ablation": {"refusal_base": 0.9, "refusal_ablated": 0.2, "refusal_drop": 0.7,
+                     "threshold": 0.4, "passes": True, "n": 100},
+        "template_stability_min": 0.93,
+        "natural_teacher_forced_cos": {"13": 0.80, "14": 0.82},
+        "natural_refusal_cos": {"13": 0.60, "14": 0.62},
+        "behavioral_vs_naive_cos": {"13": 0.50, "14": 0.55},
+    }
+    dbm.upsert_run(con, {"run_id": "v0", "experiment": "validate-drefuse", "model_id": "A",
+                         "seed": 0, "status": "completed", "started_at": "2026-01-02",
+                         "config_json": "{}", "metrics_json": json.dumps(metrics)})
+    v = tables.table_validation(load_runs(tmp_path / "v.sqlite"))
+    row = v.iloc[0]
+    assert row["model_id"] == "A" and bool(row["ablation_pass"])
+    assert abs(row["refusal_drop"] - 0.7) < 1e-9
+    assert abs(row["teacher_forced_cos"] - 0.81) < 1e-9
+    assert abs(row["template_min_cos"] - 0.93) < 1e-9
+
+
 def test_build_report_writes_tables_and_md(tmp_path):
     out = build_report(_seed(tmp_path / "r.sqlite"), tmp_path / "report")
     assert (out / "REPORT.md").exists()

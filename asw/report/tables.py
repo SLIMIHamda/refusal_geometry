@@ -184,3 +184,34 @@ def crossover_from_runs(runs, results_dir, *, judge="rubric", temperature=0.0):
     res = crossover_interaction(df)
     res["operators"], res["geometry"] = sorted(ops), sorted(geos)
     return res
+
+
+# ── d_refuse construct validity (Item 2) ──────────────────────────────────────
+def table_validation(runs):
+    """One row per model from the latest validate-drefuse run: the ablation necessary-condition
+    test plus the template / teacher-forced / naive cosine summaries (means over band layers)."""
+    import numpy as np
+    import pandas as pd
+
+    cols = ["model_id", "refusal_base", "refusal_ablated", "refusal_drop", "ablation_pass",
+            "template_min_cos", "teacher_forced_cos", "natural_dim_cos", "vs_naive_cos"]
+    if runs.empty:
+        return _empty(cols)
+    sub = runs[(runs["kind"] == "validate-drefuse") & (runs["status"] == "completed")]
+    rows = []
+    for mid, g in sub.groupby("model_id"):
+        m = g.sort_values("started_at").iloc[-1]["metrics"]
+        ab = m.get("ablation", {})
+
+        def _mean(key):
+            d = m.get(key)
+            return float(np.mean(list(d.values()))) if d else float("nan")
+
+        rows.append({"model_id": mid, "refusal_base": ab.get("refusal_base"),
+                     "refusal_ablated": ab.get("refusal_ablated"),
+                     "refusal_drop": ab.get("refusal_drop"), "ablation_pass": ab.get("passes"),
+                     "template_min_cos": m.get("template_stability_min"),
+                     "teacher_forced_cos": _mean("natural_teacher_forced_cos"),
+                     "natural_dim_cos": _mean("natural_refusal_cos"),
+                     "vs_naive_cos": _mean("behavioral_vs_naive_cos")})
+    return pd.DataFrame(rows)[cols] if rows else _empty(cols)
