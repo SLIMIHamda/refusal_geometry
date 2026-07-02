@@ -48,6 +48,13 @@ def test_classify_anti_aligned():
     vals = -0.15 + np.random.default_rng(0).normal(0, 0.01, 60)
     out = classify_geometry(vals)
     assert out["label"] == "anti-aligned" and out["ci_hi"] < 0
+    assert out["p_value"] < 0.001                     # per-layer p-value for BH-FDR (Item 4)
+
+
+def test_classify_neutral_pvalue_large():
+    vals = np.linspace(-0.2, 0.2, 41)                 # symmetric about zero
+    out = classify_geometry(vals)
+    assert out["label"] == "neutral" and out["p_value"] > 0.5
 
 
 def test_classify_neutral():

@@ -60,5 +60,30 @@ def build_report(db_path, out_dir, *, judge: str = "rubric", temperature=0.0) ->
         fig = figures.fig_alpha_tradeoff(at, fdir / "alpha_tradeoff.png") if axis == "alpha" else None
         section(f"Ablation: {axis}", at, f"ablation_{axis}.csv", fig)
 
+    # operator x geometry crossover interaction (Item 4 headline statistic)
+    md.append("## Operator x geometry interaction (Item 4)\n")
+    try:
+        res = tables.crossover_from_runs(runs, Path(db_path).parent, judge=judge,
+                                         temperature=temperature)
+    except Exception as e:  # statsmodels absent, GEE non-convergence, etc. — never break the report
+        res = None
+        md.append(f"_not computed: {type(e).__name__}: {e}_\n")
+    if res is None:
+        md.append("_(no operator-forced wrapper runs yet — run `eval --defense wrapper "
+                  "--force-op {raw_add,project}` on aligned and anti-aligned models)_\n")
+    elif res.get("insufficient"):
+        md.append(f"_insufficient design: operators={res['operators']}, geometry={res['geometry']}, "
+                  f"n_obs={res['n_obs']} — need 'none' + a forced operator across both geometry "
+                  "classes._\n")
+    else:
+        import pandas as pd
+        idf = pd.DataFrame([{"term": k, **v} for k, v in res["interactions"].items()])
+        if not idf.empty:
+            idf.to_csv(tdir / "interaction.csv", index=False)
+            md.append(_md_table(idf) + "\n")
+        md.append(f"_GEE logistic (prompt-clustered); n_obs={res['n_obs']}, "
+                  f"n_prompts={res['n_groups']}, operators={res['operators']}, "
+                  f"geometry={res['geometry']}._\n")
+
     (out / "REPORT.md").write_text("\n".join(md), encoding="utf-8")
     return out

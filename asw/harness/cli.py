@@ -217,7 +217,7 @@ def _validate_drefuse(args) -> int:
     return 0
 
 
-def _build_generator(cfg, model, tok, defense, alpha):
+def _build_generator(cfg, model, tok, defense, alpha, force_op=None):
     """Construct the Generator for a chosen defense, loading cached artifacts as needed."""
     from .generate import HFGenerator
 
@@ -248,7 +248,7 @@ def _build_generator(cfg, model, tok, defense, alpha):
         from ..baselines.defenses import cast_baseline
         return cast_baseline(model, tok, d, alpha, cond, cl)
     if defense == "wrapper":
-        return _build_wrapper(cfg, model, tok, d, alpha)
+        return _build_wrapper(cfg, model, tok, d, alpha, force_op=force_op)
     raise SystemExit(f"unknown defense '{defense}'")
 
 
@@ -260,9 +260,9 @@ def _load_geometry_amap(cfg):
     return {int(k): {"label": v} for k, v in labels.items()}
 
 
-def _build_wrapper(cfg, model, tok, d, alpha, *, layers=None, use_condition=True):
-    """The geometry-aware wrapper, with optional layer-band restriction and condition toggle
-    (the two ablation knobs beyond alpha)."""
+def _build_wrapper(cfg, model, tok, d, alpha, *, layers=None, use_condition=True, force_op=None):
+    """The geometry-aware wrapper, with optional layer-band restriction, condition toggle (the
+    two ablation knobs beyond alpha), and a forced operator (for the crossover interaction)."""
     from ..wrapper.condition import ConditionVector
     from ..wrapper.wrapper import Wrapper
 
@@ -277,7 +277,7 @@ def _build_wrapper(cfg, model, tok, d, alpha, *, layers=None, use_condition=True
         if not cp.exists():
             raise SystemExit(f"wrapper needs the condition vector; run `asw fit-condition` ({cp})")
         cond, cl = ConditionVector.load(cp), _condition_layer(cfg)
-    return Wrapper.from_geometry_map(model, tok, d, amap, alpha,
+    return Wrapper.from_geometry_map(model, tok, d, amap, alpha, force_op=force_op,
                                      condition=cond, condition_layer=cl)
 
 
@@ -305,15 +305,23 @@ def _eval(args) -> int:
     con = dbm.connect(cfg["paths"]["results_db"])
     bench = load_benchmark(args.benchmark, data_dir=cfg["paths"]["data_dir"], limit=args.limit)
     model, tok = load_model(cfg, quant=args.quant)
-    gen = _build_generator(cfg, model, tok, args.defense, args.alpha)
-    # fold the defense into the config so its hash (manifest) distinguishes the run
+    force_op = getattr(args, "force_op", None)
+    if force_op and args.defense != "wrapper":
+        raise SystemExit("--force-op only applies to --defense wrapper")
+    gen = _build_generator(cfg, model, tok, args.defense, args.alpha, force_op=force_op)
+    # fold the defense (and forced operator) into the config so its hash distinguishes the run
     if args.defense and args.defense != "none":
-        cfg = {**cfg, "defense": {"kind": args.defense, "alpha": args.alpha}}
+        spec = {"kind": args.defense, "alpha": args.alpha}
+        if force_op:
+            spec["force_op"] = force_op
+        cfg = {**cfg, "defense": spec}
     judges = {"rubric": RubricJudge()}
     if args.hf_judge:
         judges["hf_classifier"] = HFClassifierJudge()
 
-    tag = args.defense if args.defense and args.defense != "none" else None
+    tag = None
+    if args.defense and args.defense != "none":
+        tag = f"wrapper-{force_op}" if force_op else args.defense
     seeds = args.seeds if args.seeds else cfg["seeds"]
     for seed in seeds:
         metrics = evaluate_benchmark(
@@ -466,6 +474,9 @@ def main(argv=None) -> int:
                     choices=["none", "system_prompt", "abliteration", "cast", "wrapper"],
                     help="defense/generator to evaluate (default: undefended model)")
     ev.add_argument("--alpha", type=float, default=8.0, help="steering strength (steered defenses)")
+    ev.add_argument("--force-op", default=None, choices=["raw_add", "project"],
+                    help="force the wrapper's operator on all band layers (operator x geometry "
+                         "conditions for the crossover interaction, Item 4)")
     ev.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
     ev.add_argument("--limit", type=int, default=None)
     ev.add_argument("--seeds", type=int, nargs="*", default=None)

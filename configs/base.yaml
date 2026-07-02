@@ -24,9 +24,11 @@ scoring:
 validation:
   ablation_drop_threshold: 0.40
 
-# AdvBench splits inherited from the thesis (locked facts).
+# AdvBench splits. projection widened 40 -> 200 for power (Item 4): at n=100 the minimal
+# detectable difference in proportions (alpha=.05, power .8) is ~19 points, so sub-20-point
+# geometry/refusal claims need n>=200-300. Splits stay disjoint (no extract/eval overlap).
 splits:
   advbench:
     extract: [0, 200]
     eval: [200, 300]
-    projection: [300, 340]
+    projection: [300, 500]

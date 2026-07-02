@@ -52,10 +52,16 @@ class Wrapper:
                                 max_new_tokens=max_new_tokens, seed=seed)
 
     @classmethod
-    def from_geometry_map(cls, model, tok, d_by_layer, anti_alignment_map, alpha, **kw):
-        """Build branch assignments from a per-layer anti-alignment map (classify_geometry)."""
+    def from_geometry_map(cls, model, tok, d_by_layer, anti_alignment_map, alpha,
+                          *, force_op=None, **kw):
+        """Build branch assignments from a per-layer anti-alignment map (classify_geometry).
+
+        `force_op` in {"raw_add", "project"} overrides the geometry-chosen operator on every band
+        layer; running the wrapper forced to each operator on both aligned and anti-aligned models
+        yields the clean operator x geometry conditions for the crossover interaction (Item 4)."""
         from .steer import branch_for_label
 
-        branch = {int(l): branch_for_label(v["label"]) for l, v in anti_alignment_map.items()
-                  if int(l) in {int(k) for k in d_by_layer}}
+        keys = {int(k) for k in d_by_layer}
+        branch = {int(l): (force_op or branch_for_label(v["label"]))
+                  for l, v in anti_alignment_map.items() if int(l) in keys}
         return cls(model, tok, d_by_layer, branch, alpha, **kw)

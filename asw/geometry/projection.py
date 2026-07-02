@@ -24,8 +24,9 @@ def projections(acts, d, normalize_y: bool = True) -> np.ndarray:
 
 
 def classify_geometry(values, alpha: float = 0.05) -> dict:
-    """Mean projection + 95% CI -> {anti-aligned | neutral | aligned} by CI sign."""
-    from ..eval.metrics import mean_ci
+    """Mean projection + 95% CI -> {anti-aligned | neutral | aligned} by CI sign, plus a
+    per-layer p-value (H0: mean = 0) so BH-FDR can correct across layers (Item 4)."""
+    from ..eval.metrics import mean_ci, mean_pvalue
 
     vals = [float(v) for v in np.asarray(values).ravel()]
     mean, lo, hi = mean_ci(vals, alpha=alpha)
@@ -35,7 +36,8 @@ def classify_geometry(values, alpha: float = 0.05) -> dict:
         label = "aligned"
     else:
         label = "neutral"
-    return {"mean": mean, "ci_lo": lo, "ci_hi": hi, "label": label, "n": len(vals)}
+    return {"mean": mean, "ci_lo": lo, "ci_hi": hi, "p_value": mean_pvalue(vals),
+            "label": label, "n": len(vals)}
 
 
 def layer_sweep(model, tok, prompts, d_by_layer, *, batch_size: int = 16) -> dict[int, np.ndarray]:

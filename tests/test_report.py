@@ -28,8 +28,10 @@ def _seed(db):
     add("aw0", "eval:harmbench:wrapper", "A", 0, _em(0.95, 19, 20),
         {"defense": {"kind": "wrapper", "alpha": 8}})
     add("g0", "geometry-map", "A", 0,
-        {"layer_13": {"mean": -0.15, "label": "anti-aligned", "ci_lo": -0.2, "ci_hi": -0.1, "n": 40},
-         "layer_14": {"mean": -0.10, "label": "anti-aligned", "ci_lo": -0.15, "ci_hi": -0.05, "n": 40}})
+        {"layer_13": {"mean": -0.15, "label": "anti-aligned", "ci_lo": -0.2, "ci_hi": -0.1,
+                      "p_value": 0.001, "n": 40},
+         "layer_14": {"mean": -0.10, "label": "anti-aligned", "ci_lo": -0.15, "ci_hi": -0.05,
+                      "p_value": 0.02, "n": 40}})
     add("ab8", "eval:advbench:ablate-alpha:alpha=8", "A", 0, _em(0.9, 18, 20),
         {"ablation": {"axis": "alpha", "point": "alpha=8"}})
     add("ab2", "eval:advbench:ablate-alpha:alpha=2", "A", 0, _em(0.5, 10, 20),
@@ -64,6 +66,55 @@ def test_table_refusal_pools_seeds_excludes_ablation(tmp_path):
 def test_table_geometry(tmp_path):
     g = tables.table_geometry(load_runs(_seed(tmp_path / "r.sqlite")))
     assert list(g["layer"]) == [13, 14] and set(g["label"]) == {"anti-aligned"}
+    # BH-FDR q-values computed across the model's layers (Item 4)
+    assert {"p_value", "q_value", "significant"}.issubset(g.columns)
+    assert g["q_value"].notna().all() and (g["q_value"] >= g["p_value"] - 1e-9).all()
+
+
+def test_crossover_from_runs_fits_interaction(tmp_path):
+    pytest.importorskip("statsmodels")
+    import numpy as np
+    import pandas as pd
+
+    from asw import db as dbm
+
+    db = tmp_path / "x.sqlite"
+    con = dbm.connect(db)
+    rdir = tmp_path / "results"
+    rng = np.random.default_rng(0)
+    probs = {("aligned", "none"): 0.5, ("aligned", "raw_add"): 0.6, ("aligned", "project"): 0.85,
+             ("anti-aligned", "none"): 0.2, ("anti-aligned", "raw_add"): 0.8,
+             ("anti-aligned", "project"): 0.1}
+    geoms = {"AL": "aligned", "AA": "anti-aligned"}
+
+    def add(run_id, experiment, model_id, metrics, config):
+        dbm.upsert_run(con, {"run_id": run_id, "experiment": experiment, "model_id": model_id,
+                             "seed": 0, "status": "completed", "started_at": "2026-01-01",
+                             "config_json": json.dumps(config), "metrics_json": json.dumps(metrics)})
+
+    for mid, geom in geoms.items():
+        lbl = "anti-aligned" if geom == "anti-aligned" else "aligned"
+        add(f"g_{mid}", "geometry-map", mid,
+            {f"layer_{l}": {"mean": -0.1, "label": lbl, "p_value": 0.01, "n": 40} for l in (13, 14)},
+            {})
+        for op, exp, cfg in [
+            ("none", f"eval:harmbench", {"defense": {"kind": "none"}}),
+            ("raw_add", f"eval:harmbench:wrapper-raw_add",
+             {"defense": {"kind": "wrapper", "force_op": "raw_add"}}),
+            ("project", f"eval:harmbench:wrapper-project",
+             {"defense": {"kind": "wrapper", "force_op": "project"}}),
+        ]:
+            rid = f"{mid}_{op}"
+            rows = [{"prompt_id": f"p{i}", "temperature": 0.0,
+                     "label_rubric": "refusal" if rng.random() < probs[(geom, op)] else "comply"}
+                    for i in range(150)]
+            dbm.write_prompt_rows(rdir, exp, rid, rows)
+            add(rid, exp, mid, _em(0.5, 75, 150), cfg)
+
+    res = tables.crossover_from_runs(load_runs(db), rdir)
+    assert res is not None and not res.get("insufficient")
+    term = next(k for k in res["interactions"] if "project" in k and "anti-aligned" in k)
+    assert res["interactions"][term]["coef"] < 0 and res["interactions"][term]["p"] < 0.05
 
 
 def test_table_ablation_alpha(tmp_path):

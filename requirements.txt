@@ -15,6 +15,7 @@ pyarrow==16.1.0
 # ── Scoring / stats ──
 scipy==1.13.1             # Clopper-Pearson exact CI + paired Wilcoxon/t tests
 scikit-learn==1.4.2       # RoBERTa-classifier utils + Cohen's kappa agreement
+statsmodels==0.14.2       # GEE logistic operator x geometry crossover interaction (Item 4)
 
 # ── Report layer (tables + figures from runs.sqlite; CPU-friendly) ──
 matplotlib==3.8.4         # anti-alignment heatmap, refusal bars, alpha trade-off curve

@@ -119,3 +119,89 @@ def agreement(labels_a: Sequence[str], labels_b: Sequence[str]) -> dict:
     except Exception:
         pass
     return out
+
+
+# ── multiplicity, power, and the crossover interaction (Review B, Item 4) ──────
+def benjamini_hochberg(pvalues, alpha: float = 0.05):
+    """Benjamini-Hochberg FDR. Returns (qvalues, reject) aligned to input order.
+
+    With ~30 layers x per-layer CIs, uncorrected labels are guaranteed to contain noise; the
+    anti-alignment map should be read on q-values, not raw per-layer significance."""
+    p = np.asarray(pvalues, dtype=float)
+    n = p.size
+    if n == 0:
+        return np.array([]), np.array([], dtype=bool)
+    order = np.argsort(p)
+    ranked = p[order]
+    q = ranked * n / np.arange(1, n + 1)
+    q = np.minimum.accumulate(q[::-1])[::-1]           # enforce monotonic step-up
+    q_full = np.empty(n)
+    q_full[order] = np.clip(q, 0.0, 1.0)
+    return q_full, q_full <= alpha
+
+
+def required_n(delta: float, p0: float = 0.5, alpha: float = 0.05, power: float = 0.8) -> float:
+    """Per-group n to detect a `delta`-point change from baseline p0 (two-sided, two-proportion,
+    normal approximation)."""
+    if delta == 0:
+        return float("inf")
+    from scipy.stats import norm
+
+    p1 = min(max(p0 + delta, 0.0), 1.0)
+    za, zb = norm.ppf(1 - alpha / 2), norm.ppf(power)
+    pbar = (p0 + p1) / 2
+    num = (za * math.sqrt(2 * pbar * (1 - pbar))
+           + zb * math.sqrt(p0 * (1 - p0) + p1 * (1 - p1))) ** 2
+    return math.ceil(num / (abs(delta) ** 2))
+
+
+def min_detectable_effect(n: int, p0: float = 0.5, alpha: float = 0.05,
+                          power: float = 0.8) -> float:
+    """Smallest difference in proportions detectable at sample size `n` (inverts required_n).
+    At n=100, p0=0.5 this is ~0.19, which is why sub-20-point claims need n>=300."""
+    lo, hi = 0.0, 1.0 - p0
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if required_n(mid, p0, alpha, power) <= n:
+            hi = mid
+        else:
+            lo = mid
+    return hi
+
+
+def mean_pvalue(values: Sequence[float]) -> float:
+    """Two-sided p-value that the mean of `values` differs from 0 (one-sample t-test). Feeds
+    the per-layer anti-alignment test so BH-FDR can be applied across layers."""
+    arr = np.asarray([v for v in values if not math.isnan(v)], dtype=float)
+    if arr.size < 2 or arr.std(ddof=1) == 0:
+        return float("nan")
+    from scipy.stats import ttest_1samp
+
+    return float(ttest_1samp(arr, 0.0).pvalue)
+
+
+def crossover_interaction(df, *, outcome: str = "refused", operator: str = "operator",
+                          geometry: str = "geometry", group: str = "prompt_id",
+                          ref_operator: str = "none", ref_geometry: str = "aligned") -> dict:
+    """Population-averaged logistic GEE of `outcome ~ operator * geometry`, clustered on `group`
+    (prompt-level dependence; seeds are replicate rows). The interaction terms ARE the paper's
+    headline statistic: raw_add should help anti-aligned models while projection-amplification
+    should help aligned models yet hurt anti-aligned ones.
+
+    `df` is one row per (prompt, operator, geometry, seed) with a 0/1 `outcome`. Needs
+    statsmodels; returns the interaction coefficients with 95% CI and p (host-run)."""
+    import statsmodels.api as sm
+    import statsmodels.formula.api as smf
+
+    formula = (f"{outcome} ~ C({operator}, Treatment(reference='{ref_operator}'))"
+               f" * C({geometry}, Treatment(reference='{ref_geometry}'))")
+    res = smf.gee(formula, groups=group, data=df, family=sm.families.Binomial(),
+                  cov_struct=sm.cov_struct.Exchangeable()).fit()
+    ci = res.conf_int()
+    inter = {name: {"coef": float(res.params[name]),
+                    "ci_lo": float(ci.loc[name, 0]), "ci_hi": float(ci.loc[name, 1]),
+                    "p": float(res.pvalues[name])}
+             for name in res.params.index if ":" in name}
+    return {"interactions": inter, "n_obs": int(res.nobs),
+            "n_groups": int(df[group].nunique()),
+            "params": {k: float(v) for k, v in res.params.items()}}

@@ -2,6 +2,23 @@ import numpy as np
 
 from asw.wrapper.condition import ConditionVector
 from asw.wrapper.steer import branch_for_label, op_project_amplify, op_raw_add
+from asw.wrapper.wrapper import Wrapper
+
+
+def test_from_geometry_map_uses_measured_geometry():
+    d = {13: np.zeros(4), 14: np.zeros(4)}
+    amap = {13: {"label": "anti-aligned"}, 14: {"label": "aligned"}}
+    w = Wrapper.from_geometry_map(None, None, d, amap, 8.0)
+    assert w.branch_by_layer == {13: "raw_add", 14: "project"}
+
+
+def test_from_geometry_map_force_op_overrides():
+    d = {13: np.zeros(4), 14: np.zeros(4)}
+    amap = {13: {"label": "anti-aligned"}, 14: {"label": "aligned"}}
+    w = Wrapper.from_geometry_map(None, None, d, amap, 8.0, force_op="project")
+    assert w.branch_by_layer == {13: "project", 14: "project"}
+    w2 = Wrapper.from_geometry_map(None, None, d, amap, 8.0, force_op="raw_add")
+    assert w2.branch_by_layer == {13: "raw_add", 14: "raw_add"}
 
 
 def test_branch_for_label():
