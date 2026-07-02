@@ -96,7 +96,7 @@ def _extract(args) -> int:
 def _geometry_map(args) -> int:
     from .. import db as dbm
     from ..data.benchmarks import load_benchmark
-    from ..geometry.extract import load_drefuse
+    from ..geometry.extract import capture_terminal, load_drefuse
     from ..geometry.projection import anti_alignment_map
     from ..models.loader import load_model, model_commit_hash
     from ..runlog import run_context
@@ -110,10 +110,24 @@ def _geometry_map(args) -> int:
     d = load_drefuse(path)
     bench = load_benchmark(args.benchmark, data_dir=cfg["paths"]["data_dir"])
     prompts = _split(bench, cfg, "projection") if args.benchmark == "advbench" else bench.prompts()[:args.limit]
+    # cross-model direction from an aligned base model's cached d_refuse (Item 1)
+    d_cross = None
+    if args.base_config:
+        bp = _drefuse_path(load_config(args.base_config))
+        if not bp.exists():
+            raise SystemExit(f"--base-config needs its own d_refuse cache; run extract on it ({bp})")
+        d_cross = load_drefuse(bp)
     model, tok = load_model(cfg, quant=args.quant)
+    # neutral-corpus mean per layer for centered projections (Item 1); --no-center = legacy cosine
+    mu_bg = None
+    if not args.no_center:
+        neutral = load_benchmark(args.neutral, data_dir=cfg["paths"]["data_dir"],
+                                 limit=args.limit).prompts()
+        na = capture_terminal(model, tok, neutral, sorted(d))
+        mu_bg = {l: na[l].mean(axis=0) for l in d}
     with run_context(con, experiment="geometry-map", model_id=cfg["model"]["id"],
                      config=cfg, seed=0, model_hash=model_commit_hash(model)) as h:
-        amap = anti_alignment_map(model, tok, prompts, d)
+        amap = anti_alignment_map(model, tok, prompts, d, mu_bg=mu_bg, d_cross=d_cross)
         h["metrics"] = {f"layer_{l}": v for l, v in amap.items()}
         lp = _geometry_labels_path(cfg)
         lp.parent.mkdir(parents=True, exist_ok=True)
@@ -121,8 +135,11 @@ def _geometry_map(args) -> int:
                       encoding="utf-8")
     for l in sorted(amap):
         v = amap[l]
-        print(f"[geometry] layer {l:2d}: <y,d>={v['mean']:+.3f} "
-              f"CI=[{v['ci_lo']:+.3f},{v['ci_hi']:+.3f}]  {v['label']}")
+        extra = (f" z={v['z_score']:+.2f} d={v['cohens_d']:+.2f}" if "z_score" in v else "")
+        cross = f" cos_base={v['cross_model_cos']:+.2f}" if "cross_model_cos" in v else ""
+        proj_label = "proj_c" if mu_bg is not None else "<y,d>"
+        print(f"[geometry] layer {l:2d}: {proj_label}={v['mean']:+.3f} "
+              f"CI=[{v['ci_lo']:+.3f},{v['ci_hi']:+.3f}]  {v['label']}{extra}{cross}")
     return 0
 
 
@@ -451,6 +468,12 @@ def main(argv=None) -> int:
     gm.add_argument("--config", required=True)
     gm.add_argument("--benchmark", default="advbench")
     gm.add_argument("--limit", type=int, default=200)
+    gm.add_argument("--neutral", default="orbench",
+                    help="neutral corpus for the centered-projection baseline mu_bg (Item 1)")
+    gm.add_argument("--no-center", action="store_true",
+                    help="legacy uncentered cosine classification (skip the mu_bg baseline)")
+    gm.add_argument("--base-config", default=None,
+                    help="aligned base model config for the cross-model projection (Item 1)")
     gm.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
     gm.set_defaults(func=_geometry_map)
 

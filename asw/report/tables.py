@@ -59,7 +59,8 @@ def table_geometry(runs):
 
     from ..eval.metrics import benjamini_hochberg
 
-    cols = ["model_id", "layer", "projection", "p_value", "q_value", "significant", "label"]
+    cols = ["model_id", "layer", "projection", "z_score", "cohens_d", "cross_model_cos",
+            "p_value", "q_value", "significant", "label"]
     if runs.empty:
         return _empty(cols)
     sub = runs[(runs["kind"] == "geometry-map") & (runs["status"] == "completed")]
@@ -69,8 +70,9 @@ def table_geometry(runs):
         for k, v in r["metrics"].items():
             if k.startswith("layer_") and isinstance(v, dict):
                 rows.append({"model_id": mid, "layer": int(k.split("_")[1]),
-                             "projection": v.get("mean"), "p_value": v.get("p_value"),
-                             "label": v.get("label")})
+                             "projection": v.get("mean"), "z_score": v.get("z_score"),
+                             "cohens_d": v.get("cohens_d"), "cross_model_cos": v.get("cross_model_cos"),
+                             "p_value": v.get("p_value"), "label": v.get("label")})
     if not rows:
         return _empty(cols)
     df = pd.DataFrame(rows).sort_values(["model_id", "layer"]).reset_index(drop=True)
