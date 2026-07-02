@@ -26,3 +26,13 @@ def attack_success_rate(results) -> float:
     if not results:
         return float("nan")
     return sum(r.success for r in results) / len(results)
+
+
+def asr_at_budgets(results, budgets) -> dict:
+    """ASR as a function of query budget (Item 6): fraction of behaviours solved within each
+    budget. Reporting the curve, not a single point, is the honest adversarial metric."""
+    results = list(results)
+    n = len(results)
+    return {int(b): (sum(1 for r in results if r.success and r.queries <= b) / n
+                     if n else float("nan"))
+            for b in budgets}

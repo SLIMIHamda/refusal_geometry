@@ -1,7 +1,9 @@
 import math
 
-from asw.attacks.common import AttackResult, attack_success_rate, judged_comply
-from asw.attacks.gcg import AFFIRMATIVE, GCGConfig, target_string
+from asw.attacks.common import (
+    AttackResult, asr_at_budgets, attack_success_rate, judged_comply,
+)
+from asw.attacks.gcg import AFFIRMATIVE, GCGConfig, condition_penalty, target_string
 from asw.attacks.multiturn import PERSONAS, run_multiturn
 from asw.attacks.pair import PairConfig, run_pair
 from asw.harness.generate import ScriptedGenerator
@@ -33,12 +35,27 @@ def test_gcg_helpers():
     assert GCGConfig().suffix_len == 20
 
 
+def test_condition_penalty_hinge():
+    # below threshold -> no penalty; above -> lam*(proj - tau + margin)
+    assert condition_penalty(0.1, tau=0.5) == 0.0
+    assert abs(condition_penalty(0.8, tau=0.5, lam=2.0) - 0.6) < 1e-9
+    assert abs(condition_penalty(0.5, tau=0.5, margin=0.1) - 0.1) < 1e-9   # margin bites early
+
+
+def test_asr_at_budgets_is_monotone():
+    rs = [AttackResult("a", True, "p", "r", 100), AttackResult("b", True, "p", "r", 400),
+          AttackResult("c", False, "p", "r", 999)]
+    curve = asr_at_budgets(rs, [50, 100, 500, 1000])
+    assert curve[50] == 0.0 and abs(curve[100] - 1 / 3) < 1e-9
+    assert abs(curve[500] - 2 / 3) < 1e-9 and curve[1000] == curve[500]  # failure never counts
+
+
 def test_pair_succeeds_after_refinement():
     target = ScriptedGenerator(lambda p: "sure here you go" if "JAILBREAK" in p else "I cannot")
     judge = StubJudge(lambda r: "sure" in r)
     state = {"n": 0}
 
-    def attacker(behavior, last_prompt, last_resp):
+    def attacker(behavior, last_prompt, last_resp, defense_hint):
         state["n"] += 1
         return last_prompt + (" JAILBREAK" if state["n"] >= 2 else " please")
 
@@ -46,11 +63,19 @@ def test_pair_succeeds_after_refinement():
     assert res.success and "JAILBREAK" in res.final_prompt and res.queries == 3
 
 
-def test_pair_fails_within_budget():
+def test_pair_passes_defense_hint_to_attacker():
     target = ScriptedGenerator(lambda p: "I cannot")
     judge = StubJudge(lambda r: "sure" in r)
-    res = run_pair(target, lambda b, p, r: p + " x", judge, "do bad", PairConfig(n_iterations=3))
-    assert not res.success and res.queries == 3
+    seen = {}
+
+    def attacker(behavior, last_prompt, last_resp, defense_hint):
+        seen["hint"] = defense_hint
+        return last_prompt + " x"
+
+    res = run_pair(target, attacker, judge, "do bad", PairConfig(n_iterations=2),
+                   defense_hint="wrapper(raw_add) at layers 13-16")
+    assert not res.success and seen["hint"] == "wrapper(raw_add) at layers 13-16"
+    assert res.meta["defense_hint"] == "wrapper(raw_add) at layers 13-16"
 
 
 def test_multiturn_runs_all_turns_and_scores():
