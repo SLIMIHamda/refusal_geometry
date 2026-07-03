@@ -240,7 +240,7 @@ def cover_and_toc():
         ["Field", "Value"],
         ["Package", "`asw` (Python 3.10+)"],
         ["Repository", "`github.com/SLIMIHamda/refusal_geometry`"],
-        ["Reference commit", "`d3161a9` (main)"],
+        ["Reference commit", "`a1bd9fb` (main; hardened per external review, items 1-4, 6)"],
         ["Scientific target", "Anti-alignment of refusal directions; geometry-aware steering"],
         ["Compute model", "Kaggle dual-T4 (free tier) + rented A100 (paid 70B point)"],
         ["Document scope", "Methodology, architecture, implementation, and Kaggle execution guide"],
@@ -707,33 +707,48 @@ def build():
 
     story.append(H2("7.2  The anti-alignment map (C1)"))
     story.append(P(
-        "With a trustworthy direction in hand, the central measurement is simple to state: "
-        "project held-out activations onto the (unit) refusal direction and ask whether the mean "
-        "projection is positive, negative, or indistinguishable from zero. The projection is the "
-        "cosine between the activation and the direction; the <b>sign</b> is the result. Aligned "
-        "models project positively (their representations lean toward refusal); the harness&rsquo;s "
-        "hypothesis is that uncensored and abliterated models project <i>negatively</i> &mdash; "
-        "they are anti-aligned. Crucially, the label is assigned from a confidence interval, not "
-        "a point estimate, so &ldquo;anti-aligned&rdquo; is a statistical statement."))
+        "The central measurement projects held-out activations onto the refusal direction and asks "
+        "whether that projection is reliably negative. Stated naively &mdash; the raw cosine of "
+        "uncentered activations onto d_refuse &mdash; the quantity is confounded by where the "
+        "activation cloud sits and by which directions in a highly anisotropic space carry large "
+        "projections by construction. The harness therefore reports three co-registered quantities "
+        "per layer. The <b>centered projection</b> (h - mu_bg) . d_hat measures the shift of "
+        "the eval activations relative to a <i>neutral-corpus</i> mean mu_bg, so the claim must "
+        "hold after the baseline is removed. A <b>whitened random-direction null</b> draws K "
+        "directions from the empirical activation covariance and labels a layer anti-aligned only "
+        "when the centered mean falls below the null&rsquo;s 2.5th percentile &mdash; the result is "
+        "a z-score and percentile, not a bare sign. And a <b>cross-model projection</b> onto an "
+        "aligned base model&rsquo;s d_hat distinguishes &ldquo;oriented against a shared refusal "
+        "subspace&rdquo; from a per-model extraction artifact. An effect size (Cohen&rsquo;s d) and "
+        "a norm decomposition (mu = a&middot;d_hat + residual) show whether the negativity comes "
+        "from orientation or from magnitude."))
     story.append(code(
-        'def projections(acts, d, normalize_y=True):         # per-row cosine onto d\n'
-        '    d = d / np.linalg.norm(d)\n'
-        '    if normalize_y:\n'
-        '        acts = acts / np.clip(np.linalg.norm(acts, axis=-1, keepdims=True), 1e-12, None)\n'
-        '    return acts @ d\n\n'
-        'def classify_geometry(values, alpha=0.05):\n'
-        '    mean, lo, hi = mean_ci(values, alpha=alpha)     # bootstrap CI over prompts\n'
-        '    if hi < 0:   label = "anti-aligned"             # whole CI below zero\n'
-        '    elif lo > 0: label = "aligned"\n'
-        '    else:        label = "neutral"\n'
-        '    return {"mean": mean, "ci_lo": lo, "ci_hi": hi, "label": label, "n": len(values)}'))
+        'def anti_alignment_stats(acts, d, mu_bg, K=1000):\n'
+        '    proj  = (acts - mu_bg) @ unit(d)          # centered projection vs a neutral baseline\n'
+        '    mean, lo, hi = mean_ci(proj)\n'
+        '    shift = acts.mean(0) - mu_bg\n'
+        '    null  = random_direction_null(acts, shift, K)   # onto K covariance-drawn directions\n'
+        '    label = ("anti-aligned" if mean < percentile(null, 2.5)\n'
+        '             else "aligned" if mean > percentile(null, 97.5) else "neutral")\n'
+        '    return {"mean": mean, "z_score": (mean - null.mean()) / null.std(),\n'
+        '            "cohens_d": mean / proj.std(), "label": label, ...}'))
     story.append(P(
-        "A layer is labelled <b>anti-aligned</b> only when the entire 95% interval lies below "
-        "zero, <b>aligned</b> only when it lies entirely above, and <b>neutral</b> otherwise. "
-        "Running this per layer yields the anti-alignment map &mdash; one column of the "
-        "paper&rsquo;s main figure per model &mdash; and the per-layer labels are cached to drive "
-        "the wrapper&rsquo;s operator choice in Section 8. The same pure kernels run on NumPy in "
-        "the tests and on captured tensors in production."))
+        "The null is what makes the label trustworthy: a large activation shift that is "
+        "<i>orthogonal</i> to d_refuse is correctly ruled <b>neutral</b>, whereas the raw cosine "
+        "could be fooled by it. The per-layer labels are cached to drive the wrapper&rsquo;s "
+        "operator choice in Section 8; the legacy uncentered cosine remains available for "
+        "comparison. Because ~30 layers are tested per model, significance is read after a "
+        "Benjamini&ndash;Hochberg correction across layers (Section 11)."))
+    story.append(note("Construct validity of d_refuse",
+                      "Before d_refuse is trusted as <i>the</i> refusal direction, "
+                      "`validate-drefuse` runs four checks: an <b>ablation</b> necessary-condition "
+                      "test (projecting d_refuse out of the band must collapse refusal on an "
+                      "aligned model, pre-registered at &ge; 40 points); <b>template stability</b> "
+                      "(minimum pairwise cosine across five paraphrased refusal prefixes); a "
+                      "<b>teacher-forced</b> bound cos(d_forced, d_natural) using the model&rsquo;s "
+                      "own spontaneous refusal text; and the cosine to the naive harmful-vs-harmless "
+                      "difference-in-means, quantifying what the confound control changed.",
+                      color=GREEN))
 
     story.append(H2("7.3  Causal corroboration by noise-and-restore (C3)"))
     story.append(P(
@@ -747,6 +762,16 @@ def build():
         "band, which should coincide with the steering band the map identifies. The torch "
         "orchestration (an embedding-noise hook and a restore-patch hook) is isolated; the metric "
         "helpers are pure and tested."))
+    story.append(P(
+        "A band-level restore, however, only shows that the <i>layers</i> mediate refusal, not the "
+        "<i>direction</i>. The harness therefore adds a <b>directional restore</b> that returns "
+        "only the d_refuse-component of the clean&ndash;corrupt delta, "
+        "h_corrupt + ((h_clean - h_corrupt) . d_hat) d_hat, and reports the ratio "
+        "AIE_directional / AIE_full per layer with a <i>random-direction</i> restore as control. A "
+        "high ratio is the missing causal link between the direction (C1/C2) and steering along it "
+        "(C4); a low ratio honestly bounds how one-dimensional the mechanism is. Both restores are "
+        "the same hook with a different mode, and the random control quantifies how much of the "
+        "recovery any direction would supply."))
     story.append(note("Division of labour, repeated everywhere",
                       "In all three geometry modules the load-bearing mathematics is pure NumPy "
                       "and unit tested, while the torch parts are thin capture/patch hooks. This "
@@ -891,16 +916,33 @@ def build():
         "attacked identically, is the claim. PAIR and the multi-turn attacks are orchestration "
         "loops with injected attacker and judge callables, which keeps the control flow pure and "
         "unit-testable with stubs while the heavy models are supplied at runtime."))
+    story.append(H2("10.1  Making the adversary adaptive"))
+    story.append(P(
+        "A static suffix optimised against the undefended model, then replayed against the steered "
+        "one, is not a robustness result under current norms. Because the steering hook "
+        "h + alpha&middot;v is differentiable, the harness runs GCG <b>through the defense</b>: the "
+        "wrapper&rsquo;s steering hooks are active across every forward and backward pass, so the "
+        "gradient flows through the defense and the suffix is optimised against the model the "
+        "attacker actually faces. A second, <b>detector-aware</b> variant instead tries to slip "
+        "past the harmful-input condition so the wrapper never fires, by adding a hinge penalty "
+        "lambda&middot;max(0, proj_cond - tau + margin) that pushes the condition-layer "
+        "projection below the firing threshold. Reporting the static number alone would flatter the "
+        "defense; these are the honest ones."))
     story.append(code(
-        'def run_pair(target, attacker_fn, judge, behavior, config=PairConfig()):\n'
-        '    prompt = behavior\n'
-        '    for it in range(config.n_iterations):\n'
-        '        resp = target.generate([prompt], temperature=config.temperature,\n'
-        '                               max_new_tokens=config.max_new_tokens, seed=0)[0]\n'
-        '        if judged_comply(judge, prompt, resp):       # success = target complied\n'
-        '            return AttackResult(behavior, True, prompt, resp, it + 1)\n'
-        '        prompt = attacker_fn(behavior, prompt, resp)  # refine and retry\n'
-        '    return AttackResult(behavior, False, prompt, resp, config.n_iterations)'))
+        'suffix, loss, queries, history = run_gcg(\n'
+        '    model, tok, instruction,\n'
+        '    steer=WrapperSteer(model, d_by_layer, branch, alpha),   # attack the DEFENDED model\n'
+        '    condition=cond, condition_layer=cl,                     # detector-aware penalty ...\n'
+        '    penalty_lambda=lam, tau=cond.threshold, penalty_margin=m)\n'
+        '# ASR-vs-budget, not a single point:\n'
+        'curve = asr_at_budgets(results, budgets=[500, 1000, 2000, 4000])'))
+    story.append(P(
+        "Two further disciplines close the loop. Results are reported as an <b>ASR-vs-budget "
+        "curve</b> rather than a single point &mdash; the per-step query history is returned so the "
+        "curve is exact &mdash; and the adaptive PAIR attacker is handed a <b>defense hint</b>, so a "
+        "reported PAIR ASR against the wrapper reflects an informed adversary. The differentiable "
+        "GCG paths are host-run and carry the same validate-against-a-reference caveat as the base "
+        "attack; the penalty and budget helpers are pure and unit-tested."))
 
     # ════════════════════════════════════════════════════════════════════════
     # 11. EVALUATION & SCORING
@@ -950,6 +992,9 @@ def build():
         ["`mean_ci`", "Bootstrap CI over seeds", "Aggregate &ge; 3 seeds with uncertainty."],
         ["`paired_test`", "Wilcoxon / paired t", "Significance of defense-vs-defense deltas."],
         ["`agreement`", "Raw + Cohen&rsquo;s kappa", "Dual-scorer reliability."],
+        ["`benjamini_hochberg`", "BH-FDR q-values", "Correct ~30 per-layer tests per model."],
+        ["`min_detectable_effect`", "Two-proportion power", "MDE ~0.19 at n=100 sizes the splits."],
+        ["`crossover_interaction`", "Logistic GEE interaction", "The headline operator x geometry test."],
     ], [3.6 * cm, 4.4 * cm, CONTENT_W - 3.6 * cm - 4.4 * cm],
         caption="The statistics layer (`eval/metrics.py`)."))
     story.append(P(
@@ -960,6 +1005,20 @@ def build():
     story.append(figure("fig9_eval",
                         "Evaluation sequence: resumable generation, two judges, exact CIs and "
                         "agreement, then a manifest row plus a per-prompt Parquet file."))
+    story.append(H2("11.3  Multiplicity and the crossover interaction"))
+    story.append(P(
+        "Two further requirements govern the headline claim. Because the anti-alignment map tests "
+        "on the order of thirty layers per model, per-layer labels are read after a "
+        "<b>Benjamini&ndash;Hochberg</b> correction across layers (q-values), not raw significance. "
+        "And the project&rsquo;s central prediction &mdash; that raw-addition rescues anti-aligned "
+        "models while projection-amplification helps aligned ones yet fails on anti-aligned ones "
+        "&mdash; is not a pair of separate rates but a single <b>interaction</b>. It is estimated "
+        "with a population-averaged logistic GEE of refusal on operator x geometry, clustered "
+        "on prompt (seeds as replicates); the interaction coefficient, with its confidence "
+        "interval, <i>is</i> the paper&rsquo;s headline statistic. The operator conditions are made "
+        "runnable by forcing the wrapper&rsquo;s operator (" + cc("eval --force-op") + "), and a "
+        "two-proportion power calculation sets the sample sizes &mdash; a ~19-point minimal "
+        "detectable effect at n = 100 is why the projection split was widened to 200."))
 
     # ════════════════════════════════════════════════════════════════════════
     # 12. ORCHESTRATION & CLI
@@ -974,9 +1033,10 @@ def build():
         ["Subcommand", "Stage", "Principal flags"],
         ["`selfcheck`", "Resolve+hash a config, capture env", "--config"],
         ["`extract`", "Estimate d_refuse (C2)", "--config --layers --quant"],
-        ["`geometry-map`", "Anti-alignment map (C1)", "--config --benchmark"],
+        ["`geometry-map`", "Anti-alignment map (C1)", "--config --neutral --base-config --no-center"],
+        ["`validate-drefuse`", "Construct validity of d_refuse", "--config --benign --layers"],
         ["`fit-condition`", "Fit the condition vector (C4)", "--config --benign"],
-        ["`eval`", "Evaluate a defense on a benchmark", "--config --benchmark --defense --alpha --seeds"],
+        ["`eval`", "Evaluate a defense on a benchmark", "--config --defense --alpha --force-op --seeds"],
         ["`ablate`", "Sweep one wrapper axis", "--config --axis --alphas --layer-sets"],
         ["`models-verify`", "T=0 determinism gate (M1)", "--config --quant"],
         ["`report`", "Regenerate tables + figures (M5)", "--config --out"],
@@ -1247,7 +1307,7 @@ def build():
     story.append(H1("16  Testing and Validation"))
     story.append(P(
         "The test suite is both a correctness guarantee and a specification of intended behaviour. "
-        "86 tests pass on a GPU-free machine; one torch-bound hook test is skipped where torch "
+        "115 tests pass on a GPU-free machine; one torch-bound hook test is skipped where torch "
         "cannot load and runs on the Kaggle host. The pure numerical kernels &mdash; geometry, "
         "operators, condition vector, statistics, report aggregation &mdash; are exercised "
         "directly with NumPy, so the falsifiable predictions of Section 8 and the pooling logic of "
@@ -1255,11 +1315,12 @@ def build():
     story.extend(table([
         ["Test module", "What it pins"],
         ["`test_config` / `test_db`", "Hash determinism; manifest upsert + resume semantics."],
-        ["`test_metrics` / `test_refusal`", "Clopper&ndash;Pearson, bootstrap, kappa; the rubric rules."],
-        ["`test_geometry`", "Direction sign, projection cosine, CI-based classification."],
+        ["`test_metrics`", "Exact CIs, bootstrap, kappa; BH-FDR, power/MDE, the GEE interaction."],
+        ["`test_geometry`", "Centered projection, whitened null, effect size, construct validity."],
+        ["`test_trace`", "Directional restore, AIE ratios, random-direction control."],
         ["`test_wrapper`", "Operator math &mdash; incl. the anti-aligned failure of projection."],
-        ["`test_hooks`", "Capture + steer (torch; runs on the host)."],
-        ["`test_baselines` / `test_attacks`", "Generator composition; PAIR/multi-turn loops, ASR."],
+        ["`test_hooks`", "Capture + steer + ablate (torch; runs on the host)."],
+        ["`test_baselines` / `test_attacks`", "Generator composition; adaptive-attack helpers, ASR."],
         ["`test_cli` / `test_report`", "Defense-factory routing; manifest pooling and artifacts."],
     ], [4.6 * cm, CONTENT_W - 4.6 * cm],
         caption="Test coverage by module."))
@@ -1275,16 +1336,17 @@ def build():
         ["`db.py`", "connect, make_run_id, upsert_run, write_prompt_rows, run_parquet_path"],
         ["`runlog.py`", "run_context"],
         ["`models/loader.py`", "load_model, quant_spec, verify_model, model_commit_hash"],
-        ["`models/hooks.py`", "ActivationCapture, Steerer, get_module, no_grad_eval"],
+        ["`models/hooks.py`", "ActivationCapture, Steerer, Ablator, get_module, no_grad_eval"],
         ["`data/benchmarks.py`", "load_benchmark, Benchmark, Example, from_jsonl"],
-        ["`geometry/extract.py`", "extract_drefuse, mean_difference_direction, capture_terminal"],
-        ["`geometry/projection.py`", "projections, classify_geometry, anti_alignment_map"],
-        ["`geometry/trace.py`", "noise_sigma, aie_grid, EmbeddingNoise, RestorePatch"],
+        ["`geometry/extract.py`", "extract_drefuse, mean_difference_direction, naive_dim_direction, capture_terminal"],
+        ["`geometry/projection.py`", "anti_alignment_stats, centered_projections, random_direction_null, anti_alignment_map"],
+        ["`geometry/validate.py`", "run_validation (ablation, template, teacher-forced, naive-DIM)"],
+        ["`geometry/trace.py`", "directional_restore, aie_ratio, directional_aie_summary, RestorePatch"],
         ["`wrapper/`", "ConditionVector, branch_for_label, op_raw_add, op_project_amplify, Wrapper"],
         ["`baselines/defenses.py`", "system_prompt_defense, ClassifierFilter, cast_baseline, abliteration_reversal"],
-        ["`attacks/`", "run_gcg, run_pair, run_multiturn, attack_success_rate, AttackResult"],
+        ["`attacks/`", "run_gcg (steer/detector-aware), run_pair, condition_penalty, asr_at_budgets"],
         ["`scorers/`", "is_refusal, RubricJudge, HFClassifierJudge, LLMJudge"],
-        ["`eval/metrics.py`", "refusal_rate_ci, wilson_ci, mean_ci, paired_test, agreement"],
+        ["`eval/metrics.py`", "refusal_rate_ci, mean_ci, benjamini_hochberg, min_detectable_effect, crossover_interaction"],
         ["`harness/`", "evaluate_benchmark, HFGenerator, run_generation, main (CLI)"],
         ["`report/`", "load_runs, table_refusal, table_geometry, table_ablation, build_report"],
     ], [4.4 * cm, CONTENT_W - 4.4 * cm], caption="Public API by module."))
@@ -1296,10 +1358,11 @@ def build():
         ["transformers >= 4.43", "GPU host", "Model/tokenizer; 4.44.2 for Qwen-2.5."],
         ["accelerate, bitsandbytes", "GPU host", "device_map dispatch; int8/nf4 quantisation."],
         ["numpy, pandas, pyarrow", "spine", "Kernels, manifest queries, Parquet."],
-        ["scipy, scikit-learn", "spine", "Exact CIs; Cohen&rsquo;s kappa."],
+        ["scipy, scikit-learn", "spine", "Exact CIs; Cohen&rsquo;s kappa; power."],
+        ["statsmodels", "spine", "GEE logistic operator x geometry interaction (Item 4)."],
         ["matplotlib, tabulate", "report", "Figures; Markdown tables."],
         ["pyyaml", "spine", "Config parsing."],
-        ["pytest", "dev", "The 86-test spine."],
+        ["pytest", "dev", "The 115-test spine."],
     ], [4.4 * cm, 2.6 * cm, CONTENT_W - 4.4 * cm - 2.6 * cm],
         caption="Dependencies by execution tier."))
 
@@ -1320,7 +1383,7 @@ def build():
     story.append(Spacer(1, 10))
     story.append(Paragraph(
         "<i>This document was generated programmatically from the repository state at commit "
-        "d3161a9. Its figures are produced with matplotlib and its layout with reportlab; both "
+        "a1bd9fb. Its figures are produced with matplotlib and its layout with reportlab; both "
         "are regenerable from the accompanying build scripts.</i>", S["caption"]))
 
     final = cover_and_toc() + story
