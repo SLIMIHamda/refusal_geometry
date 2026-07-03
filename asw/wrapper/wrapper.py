@@ -40,6 +40,18 @@ class Wrapper:
         flags = self.condition.predict(acts)            # numpy bool [N]
         return torch.as_tensor(np.asarray(flags), dtype=torch.bool)
 
+    def steer_context(self, mask=None):
+        """The wrapper's steering hooks as a standalone context manager (WrapperSteer).
+
+        Used by the adaptive attack (Item 6, Step 2): passing this as `steer=` to run_gcg makes
+        the geometry branch active across every forward/backward pass, so GCG optimises the suffix
+        against the DEFENDED model — the honest "through-the-defense" attack. `mask=None` steers
+        every row (i.e. assume the detector fired), which is the strongest defensive posture."""
+        from .steer import WrapperSteer
+
+        return WrapperSteer(self.model, self.d_by_layer, self.branch_by_layer,
+                            self.alpha, mask=mask, site=self.site)
+
     def generate(self, prompts, *, temperature, max_new_tokens, seed):
         from ..harness.generate import HFGenerator
         from .steer import WrapperSteer

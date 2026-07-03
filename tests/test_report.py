@@ -117,6 +117,55 @@ def test_crossover_from_runs_fits_interaction(tmp_path):
     assert res["interactions"][term]["coef"] < 0 and res["interactions"][term]["p"] < 0.05
 
 
+def _attack_metrics(defense, attack, asr, budgets, mq=1200.0, n=3):
+    return {"defense": defense, "attack": attack, "asr": asr, "n_behaviors": n,
+            "mean_queries": mq, "asr_at_budgets": {str(b): v for b, v in budgets.items()},
+            "per_behavior_success": [{"behavior": "b", "success": True, "queries": 400}]}
+
+
+def _seed_attacks(db):
+    con = dbm.connect(db)
+
+    def add(run_id, experiment, model_id, metrics, started="2026-02-01T00:00"):
+        dbm.upsert_run(con, {"run_id": run_id, "experiment": experiment, "model_id": model_id,
+                             "seed": 0, "status": "completed", "started_at": started,
+                             "config_json": json.dumps({"attack": {"name": experiment}}),
+                             "metrics_json": json.dumps(metrics)})
+
+    add("at_none", "attack:gcg:none", "A",
+        _attack_metrics("none", "gcg", 0.9, {500: 0.3, 1000: 0.6, 2000: 0.9}))
+    add("at_wrap", "attack:gcg-adaptive:wrapper", "A",
+        _attack_metrics("wrapper", "gcg-adaptive", 0.3, {500: 0.0, 1000: 0.1, 2000: 0.3}))
+    # a later run of the same (defense, attack) pair must win
+    add("at_wrap_old", "attack:gcg-adaptive:wrapper", "A",
+        _attack_metrics("wrapper", "gcg-adaptive", 0.99, {500: 0.9, 1000: 0.9, 2000: 0.9}),
+        started="2026-01-01T00:00")
+    return db
+
+
+def test_table_attacks_latest_per_pair(tmp_path):
+    t = tables.table_attacks(load_runs(_seed_attacks(tmp_path / "a.sqlite")))
+    assert set(t["attack"]) == {"gcg", "gcg-adaptive"}
+    assert {"asr@500", "asr@1000", "asr@2000"}.issubset(t.columns)
+    wrap = t[t["defense"] == "wrapper"].iloc[0]
+    assert abs(wrap["asr"] - 0.3) < 1e-9                     # latest run, not the 0.99 stale one
+    assert abs(wrap["asr@2000"] - 0.3) < 1e-9
+    none = t[t["defense"] == "none"].iloc[0]
+    assert abs(none["asr@500"] - 0.3) < 1e-9                 # undefended cracks earlier
+
+
+def test_table_attacks_empty():
+    import pandas as pd
+    assert tables.table_attacks(pd.DataFrame()).empty
+
+
+def test_build_report_includes_attacks(tmp_path):
+    out = build_report(_seed_attacks(tmp_path / "a.sqlite"), tmp_path / "rep")
+    md = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "Adversarial robustness" in md
+    assert (out / "tables" / "attacks.csv").exists()
+
+
 def test_table_ablation_alpha(tmp_path):
     a = tables.table_ablation(load_runs(_seed(tmp_path / "r.sqlite")), "alpha")
     assert set(a["point"]) == {"alpha=2", "alpha=8"}

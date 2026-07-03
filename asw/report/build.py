@@ -63,6 +63,12 @@ def build_report(db_path, out_dir, *, judge: str = "rubric", temperature=0.0) ->
         fig = figures.fig_alpha_tradeoff(at, fdir / "alpha_tradeoff.png") if axis == "alpha" else None
         section(f"Ablation: {axis}", at, f"ablation_{axis}.csv", fig)
 
+    # adversarial robustness — ASR vs query budget (C5, Item 6)
+    attacks = tables.table_attacks(runs)
+    asr_fig = figures.fig_asr_vs_budget(attacks, fdir / "asr_vs_budget.png") \
+        if not attacks.empty else None
+    section("Adversarial robustness — ASR vs query budget (C5)", attacks, "attacks.csv", asr_fig)
+
     # operator x geometry crossover interaction (Item 4 headline statistic)
     md.append("## Operator x geometry interaction (Item 4)\n")
     try:

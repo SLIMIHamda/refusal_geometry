@@ -64,6 +64,39 @@ def fig_refusal_bars(refusal_table, benchmark, path):
     return path
 
 
+def fig_asr_vs_budget(attack_table, path):
+    """ASR vs query budget, one line per (attack, defense) — the C5 headline curve. The wrapper's
+    through-defense curve sitting below the undefended one is the defense claim (Item 6)."""
+    if attack_table.empty:
+        return None
+    budget_cols = [c for c in attack_table.columns if str(c).startswith("asr@")]
+    if not budget_cols:
+        return None
+    budgets = sorted(int(str(c).split("@")[1]) for c in budget_cols)
+
+    plt = _plt()
+    fig, ax = plt.subplots(figsize=(5, 4))
+    plotted = False
+    for _, r in attack_table.iterrows():
+        ys = [r.get(f"asr@{b}") for b in budgets]
+        if all(y is None or (isinstance(y, float) and y != y) for y in ys):  # all NaN
+            continue
+        ax.plot(budgets, ys, marker="o", label=f"{r['attack']} / {r['defense']}")
+        plotted = True
+    if not plotted:
+        plt.close(fig)
+        return None
+    ax.set_xlabel("query budget")
+    ax.set_ylabel("attack success rate")
+    ax.set_ylim(0, 1)
+    ax.set_title("Adversarial robustness — ASR vs query budget (C5)")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
 def fig_alpha_tradeoff(alpha_table, path):
     """Refusal rate vs steering strength alpha, one line per benchmark (the safety/utility
     trade-off curve)."""

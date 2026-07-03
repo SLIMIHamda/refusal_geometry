@@ -404,6 +404,109 @@ def _ablate(args) -> int:
     return 0
 
 
+def _attack(args) -> int:
+    """Adversarial robustness suite (C5, Item 6). Attacks a defended Generator with GCG
+    (static / through-defense / detector-aware) or the cheap multi-turn demo, and records ASR +
+    the ASR-vs-budget curve to the manifest under experiment `attack:<attack>:<defense>`."""
+    from .. import db as dbm
+    from ..attacks.common import asr_at_budgets
+    from ..attacks.gcg import GCGConfig
+    from ..attacks.run import run_attack_suite, suite_metrics
+    from ..data.benchmarks import load_benchmark
+    from ..models.loader import load_model, model_commit_hash
+    from ..runlog import run_context
+    from ..scorers.judge import RubricJudge
+    from ..wrapper.condition import ConditionVector
+    from ..wrapper.wrapper import Wrapper
+
+    cfg = load_config(args.config)
+    con = dbm.connect(cfg["paths"]["results_db"])
+    acfg = cfg.get("attack", {})
+
+    # behaviour set: pre-registered AdvBench eval split (disjoint from extract/projection), or
+    # the first N of any other benchmark.
+    bench = load_benchmark(args.behaviors, data_dir=cfg["paths"]["data_dir"])
+    behaviors = _split(bench, cfg, "eval") if args.behaviors == "advbench" else bench.prompts()
+    if args.limit:
+        behaviors = behaviors[:args.limit]
+
+    force_op = getattr(args, "force_op", None)
+    if force_op and args.defense != "wrapper":
+        raise SystemExit("--force-op only applies to --defense wrapper")
+
+    model, tok = load_model(cfg, quant=args.quant)
+    gen = _build_generator(cfg, model, tok, args.defense, args.alpha, force_op=force_op)
+    judge = RubricJudge()                       # pre-registered primary success judge
+    budgets = args.budgets or acfg.get("budgets") or None
+    gc = None
+
+    if args.attack == "multiturn":
+        from ..attacks.multiturn import run_multiturn
+        results = [run_multiturn(gen, b, judge) for b in behaviors]
+        curve = asr_at_budgets(results, budgets or [1, 2, 3])   # multi-turn 'queries' = turns
+    elif args.attack == "pair":
+        raise SystemExit("attack 'pair' needs an attacker LLM; wire run_pair with an "
+                         "attacker_fn in the notebook/API (not exposed on the CLI).")
+    else:                                        # gcg | gcg-adaptive | gcg-detector
+        suffix_len = acfg.get("suffix_len", GCGConfig.suffix_len)
+        gc = GCGConfig(
+            n_steps=args.n_steps or acfg.get("n_steps", GCGConfig.n_steps),
+            search_width=args.search_width or acfg.get("search_width", GCGConfig.search_width),
+            topk=args.topk or acfg.get("topk", GCGConfig.topk),
+            suffix_len=suffix_len, init_suffix=" ".join(["!"] * suffix_len))
+        steer = condition = condition_layer = None
+        tau = penalty_lambda = penalty_margin = 0.0
+        if args.attack == "gcg-adaptive":
+            if not isinstance(gen, Wrapper):
+                raise SystemExit("gcg-adaptive attacks THROUGH a steered defense; use "
+                                 "--defense {wrapper,cast,abliteration}")
+            steer = gen.steer_context()         # optimise against the steered model
+        elif args.attack == "gcg-detector":
+            cp = _condition_path(cfg)
+            if not cp.exists():
+                raise SystemExit(f"gcg-detector needs the condition vector; run "
+                                 f"`asw fit-condition` first ({cp})")
+            condition, condition_layer = ConditionVector.load(cp), _condition_layer(cfg)
+            tau = condition.threshold           # tau is the detector's own firing threshold
+            penalty_lambda = (args.penalty_lambda if args.penalty_lambda is not None
+                              else acfg.get("penalty_lambda", 1.0))
+            penalty_margin = (args.penalty_margin if args.penalty_margin is not None
+                              else acfg.get("penalty_margin", 0.0))
+        results, curve = run_attack_suite(
+            model, tok, gen, judge, behaviors, config=gc,
+            steer=steer, condition=condition, condition_layer=condition_layer,
+            tau=tau, penalty_lambda=penalty_lambda, penalty_margin=penalty_margin,
+            budgets=budgets, temperature=cfg["decoding"]["temperatures"][0],
+            max_new_tokens=cfg["decoding"]["max_new_tokens"], seed=args.seed)
+
+    metrics = suite_metrics(results, curve, attack=args.attack, defense=args.defense)
+
+    # fold attack provenance + defense into the config so the config hash distinguishes the run
+    grid = sorted(int(k) for k in metrics["asr_at_budgets"])
+    prov = {"name": args.attack, "budgets": grid}
+    if gc is not None:
+        prov.update(n_steps=gc.n_steps, search_width=gc.search_width, topk=gc.topk,
+                    suffix_len=gc.suffix_len)
+        if args.attack == "gcg-detector":
+            prov.update(penalty_lambda=penalty_lambda, penalty_margin=penalty_margin)
+    spec = {"kind": args.defense, "alpha": args.alpha}
+    if force_op:
+        spec["force_op"] = force_op
+    rcfg = {**cfg, "attack": prov, "defense": spec}
+
+    experiment = f"attack:{args.attack}:{args.defense}"
+    with run_context(con, experiment=experiment, model_id=cfg["model"]["id"],
+                     config=rcfg, seed=args.seed, model_hash=model_commit_hash(model)) as h:
+        h["metrics"] = metrics
+        dbm.write_prompt_rows(cfg["paths"]["results_dir"], experiment, h["run_id"],
+                              [{"behavior": r.behavior, "success": r.success, "queries": r.queries,
+                                "final_prompt": r.final_prompt, "response": r.response}
+                               for r in results])
+    print(f"[attack] {args.attack} vs {args.defense}: ASR={metrics['asr']:.3f} "
+          f"n={metrics['n_behaviors']}  ASR@budget={metrics['asr_at_budgets']}")
+    return 0
+
+
 def _report(args) -> int:
     from ..report.build import build_report
 
@@ -526,6 +629,34 @@ def main(argv=None) -> int:
     ab.add_argument("--seeds", type=int, nargs="*", default=None)
     ab.add_argument("--hf-judge", action="store_true")
     ab.set_defaults(func=_ablate)
+
+    at = sub.add_parser("attack", help="adversarial robustness suite vs a defense (C5, Item 6)")
+    at.add_argument("--config", required=True)
+    at.add_argument("--defense", default="none",
+                    choices=["none", "system_prompt", "abliteration", "cast", "wrapper"],
+                    help="defended generator to attack (default: undefended model)")
+    at.add_argument("--attack", default="gcg",
+                    choices=["gcg", "gcg-adaptive", "gcg-detector", "pair", "multiturn"],
+                    help="gcg=static; gcg-adaptive=through the defense; gcg-detector=evade the "
+                         "condition; multiturn=cheap persona demo")
+    at.add_argument("--behaviors", default="advbench",
+                    help="behaviour benchmark ('advbench' uses the pre-registered eval split)")
+    at.add_argument("--budgets", type=int, nargs="*", default=None,
+                    help="query-budget grid for the ASR curve (default: config attack.budgets)")
+    at.add_argument("--alpha", type=float, default=8.0, help="steering strength (steered defenses)")
+    at.add_argument("--force-op", default=None, choices=["raw_add", "project"],
+                    help="force the wrapper's operator on all band layers")
+    at.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
+    at.add_argument("--limit", type=int, default=None, help="cap number of behaviours")
+    at.add_argument("--seed", type=int, default=0)
+    at.add_argument("--n-steps", type=int, default=None, help="override GCG steps")
+    at.add_argument("--search-width", type=int, default=None, help="override GCG candidates/step")
+    at.add_argument("--topk", type=int, default=None, help="override GCG top-k per position")
+    at.add_argument("--penalty-lambda", type=float, default=None,
+                    help="detector-aware hinge weight lambda (gcg-detector)")
+    at.add_argument("--penalty-margin", type=float, default=None,
+                    help="detector-aware hinge margin (gcg-detector)")
+    at.set_defaults(func=_attack)
 
     rp = sub.add_parser("report", help="regenerate all tables + figures from runs.sqlite (M5)")
     rp.add_argument("--config", required=True)

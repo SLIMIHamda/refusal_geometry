@@ -6,14 +6,23 @@ target actually complies. Host-run torch; pure helpers are unit-tested.
 
 NOTE: validate this implementation against nanoGCG / llm-attacks on a known-jailbreakable
 case before trusting absolute ASR numbers — token-boundary handling under chat templates is
-the usual source of silent breakage. The relative comparison (wrapper vs naive vs SP) is the
-claim, and all three are attacked identically.
+the usual source of silent breakage (see scripts/validate_gcg.py, Step 5). The relative
+comparison (wrapper vs naive vs SP) is the claim, and all three are attacked identically.
+
+The suffix is optimised INSIDE the user turn, at the exact slot the attack driver fills at
+eval time (`behavior + " " + suffix`): a sentinel marks that slot in the chat-templated
+string and the string is split on it, so the optimised tokens transfer to generation. The
+templated text is tokenised with add_special_tokens=False to match HFGenerator/capture_terminal
+(no double BOS) — the detector-aware penalty reads the same terminal token the wrapper does.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 AFFIRMATIVE = "Sure, here is"
+# Sentinel marking where the adversarial suffix is spliced into the chat-templated prompt.
+# Plain ASCII so no tokenizer treats it as a special token; removed by the split before use.
+_OPTIM_SLOT = "[[GCG-OPTIM-SLOT]]"
 
 
 @dataclass
@@ -71,9 +80,15 @@ def run_gcg(model, tok, instruction, target=None, config: GCGConfig | None = Non
     def ids(text, add_special=False):
         return tok(text, return_tensors="pt", add_special_tokens=add_special).input_ids[0].to(device)
 
-    prefix = tok.apply_chat_template([{"role": "user", "content": instruction + " "}],
-                                     tokenize=False, add_generation_prompt=True)
-    prefix_ids = ids(prefix, add_special=True)
+    # Splice the suffix into the user turn at the driver's eval-time slot. `add_generation_prompt`
+    # closes the user turn and opens the assistant header, so post_str carries that header and the
+    # suffix stays where the adversary can actually control it.
+    templated = tok.apply_chat_template(
+        [{"role": "user", "content": instruction + " " + _OPTIM_SLOT}],
+        tokenize=False, add_generation_prompt=True)
+    pre_str, post_str = templated.split(_OPTIM_SLOT)
+    pre_ids = ids(pre_str)                  # user turn up to the suffix (BOS matched to HFGenerator)
+    post_ids = ids(post_str)                # rest of the user turn + assistant generation header
     suffix_ids = ids(cfg.init_suffix)
     target_ids = ids(tgt)
 
@@ -83,7 +98,7 @@ def run_gcg(model, tok, instruction, target=None, config: GCGConfig | None = Non
         cond_dir = torch.as_tensor(getattr(condition, "direction", condition),
                                    device=device, dtype=embed_w.dtype)
         cond_dir = cond_dir / cond_dir.norm()
-        cond_pos = prefix_ids.shape[0] + suffix_ids.shape[0] - 1   # end of the user turn
+        cond_pos = -(target_ids.shape[0] + 1)   # terminal prompt token the detector reads
 
     queries = 0
     best_loss = float("inf")
@@ -91,17 +106,30 @@ def run_gcg(model, tok, instruction, target=None, config: GCGConfig | None = Non
     history: list = []
 
     def build(sfx):
-        return torch.cat([prefix_ids, sfx, target_ids])
+        return torch.cat([pre_ids, sfx, post_ids, target_ids])
 
     def loss_of(seqs):
+        # Candidate ranking uses the SAME objective the gradient step optimises: affirmative-target
+        # cross-entropy plus (detector-aware) the evasion hinge. Ranking on CE alone would let the
+        # gradient point toward evasion while selection ignored it, so the suffix would never
+        # actually drop the detector projection — the penalty must gate selection too.
+        cap2, h2 = {}, None
+        if cond_dir is not None:
+            def _ch(_m, _i, out, _c=cap2):
+                _c["h"] = hidden_of(out)[:, cond_pos, :]
+            h2 = get_module(model, condition_layer).register_forward_hook(_ch)
         out = model(seqs).logits
         tstart = seqs.shape[1] - target_ids.shape[0]
         logits = out[:, tstart - 1:-1, :]
         tgt_rep = target_ids.unsqueeze(0).expand(seqs.shape[0], -1)
-        return F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt_rep.reshape(-1),
-                               reduction="none").view(seqs.shape[0], -1).mean(1)
+        ce = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt_rep.reshape(-1),
+                             reduction="none").view(seqs.shape[0], -1).mean(1)
+        if cond_dir is not None:
+            ce = ce + penalty_lambda * torch.relu((cap2["h"] @ cond_dir) - tau + penalty_margin)
+            h2.remove()
+        return ce
 
-    sl = slice(prefix_ids.shape[0], prefix_ids.shape[0] + suffix_ids.shape[0])
+    sl = slice(pre_ids.shape[0], pre_ids.shape[0] + suffix_ids.shape[0])
     ts = slice(-target_ids.shape[0], None)
 
     with (steer if steer is not None else contextlib.nullcontext()):

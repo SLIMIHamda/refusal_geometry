@@ -32,3 +32,21 @@ splits:
     extract: [0, 200]
     eval: [200, 300]
     projection: [300, 500]
+
+# Adversarial robustness pre-registration (Review B, Item 6 / C5). Fixed BEFORE any attack run:
+# the GCG cost/strength config, the query-budget grid for the ASR curve, and the detector-aware
+# hinge. tau is NOT a free parameter — it is the fitted condition vector's own threshold. The
+# behaviour set is the disjoint AdvBench eval split; rubric is the primary judge (HF classifier
+# for agreement, human spot-check on n=20). Rationale: docs/PRE_REGISTRATION_C5.md. The `asw
+# attack` CLI reads these as defaults; --n-steps/--budgets/--penalty-* override per run.
+attack:
+  n_steps: 250
+  search_width: 256        # candidate substitutions scored per step == queries per step
+  topk: 256                # top-k tokens per position by -gradient
+  suffix_len: 20
+  # budget = steps x search_width; grid spans ~31 -> 250 steps of the 64k-query full run
+  budgets: [8000, 16000, 32000, 64000]
+  penalty_lambda: 1.0      # detector-aware hinge weight on max(0, proj_cond - tau + margin)
+  penalty_margin: 0.05     # drive the projection a margin BELOW tau, not merely to it
+  behaviors: advbench-eval # provenance: the [200,300] AdvBench eval split
+  judge: rubric            # provenance: primary success judge

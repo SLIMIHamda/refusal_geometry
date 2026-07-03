@@ -188,6 +188,44 @@ def crossover_from_runs(runs, results_dir, *, judge="rubric", temperature=0.0):
     return res
 
 
+# ── adversarial robustness — ASR vs query budget (C5, Item 6) ─────────────────
+def table_attacks(runs):
+    """Per (defense, attack): attack success rate + the ASR-at-budget points, from the latest
+    `attack:*` run of each pair. Budget columns are named `asr@{budget}`. The honest headline is
+    the through-defense / detector-aware ASR, not a static-suffix replay — the `attack` column
+    says which was run."""
+    import pandas as pd
+
+    base = ["defense", "attack", "asr", "n_behaviors", "mean_queries"]
+    if runs.empty:
+        return _empty(base)
+    sub = runs[(runs["kind"] == "attack") & (runs["status"] == "completed")]
+    if sub.empty:
+        return _empty(base)
+    sub = sub.sort_values("started_at")
+    rows, budget_cols = {}, set()
+    for _, r in sub.iterrows():
+        m = r["metrics"]
+        if "asr" not in m:
+            continue
+        row = {"defense": m.get("defense", r["defense"]), "attack": m.get("attack"),
+               "asr": m.get("asr"), "n_behaviors": m.get("n_behaviors"),
+               "mean_queries": m.get("mean_queries")}
+        for b, v in (m.get("asr_at_budgets") or {}).items():
+            col = f"asr@{int(b)}"
+            row[col] = v
+            budget_cols.add((int(b), col))
+        rows[(row["defense"], row["attack"])] = row      # latest wins (sorted by started_at)
+    if not rows:
+        return _empty(base)
+    cols = base + [c for _, c in sorted(budget_cols)]
+    df = pd.DataFrame(list(rows.values()))
+    for _, c in budget_cols:
+        if c not in df:
+            df[c] = float("nan")
+    return df[cols].sort_values(["attack", "defense"]).reset_index(drop=True)
+
+
 # ── d_refuse construct validity (Item 2) ──────────────────────────────────────
 def table_validation(runs):
     """One row per model from the latest validate-drefuse run: the ablation necessary-condition

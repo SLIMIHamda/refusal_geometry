@@ -61,3 +61,29 @@ def test_ablation_points_layers():
 def test_ablation_points_bad_axis():
     with pytest.raises(SystemExit):
         _ablation_points("nonsense", alpha=8.0, alphas=[], layer_sets=[])
+
+
+def test_attack_cli_parses_and_dispatches(monkeypatch):
+    """The `attack` subcommand wires its flags to _attack (dispatch is stubbed so no model loads)."""
+    import asw.harness.cli as cli
+
+    captured = {}
+
+    def fake(args):
+        captured["args"] = args
+        return 0
+
+    monkeypatch.setattr(cli, "_attack", fake)
+    rc = cli.main(["attack", "--config", "c.yaml", "--attack", "gcg-detector",
+                   "--defense", "wrapper", "--behaviors", "advbench",
+                   "--budgets", "500", "1000", "--penalty-lambda", "0.5", "--limit", "5"])
+    a = captured["args"]
+    assert rc == 0 and a.attack == "gcg-detector" and a.defense == "wrapper"
+    assert a.budgets == [500, 1000] and a.penalty_lambda == 0.5 and a.limit == 5
+
+
+def test_attack_cli_rejects_unknown_attack():
+    import asw.harness.cli as cli
+
+    with pytest.raises(SystemExit):        # argparse rejects a bad --attack choice
+        cli.main(["attack", "--config", "c.yaml", "--attack", "nope"])
