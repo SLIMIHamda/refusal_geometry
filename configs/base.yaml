@@ -26,7 +26,10 @@ validation:
 
 # AdvBench splits. projection widened 40 -> 200 for power (Item 4): at n=100 the minimal
 # detectable difference in proportions (alpha=.05, power .8) is ~19 points, so sub-20-point
-# geometry/refusal claims need n>=200-300. Splits stay disjoint (no extract/eval overlap).
+# geometry/refusal claims need n>=200-300. The extra prompts come from held-out AdvBench
+# [340,500], disjoint from extract/eval ([0,300)); requires >=500 downloaded rows (see the
+# _split truncation guard). This widening changed the config hash, so any pre-widening
+# geometry-map runs do not collide with post-widening ones.
 splits:
   advbench:
     extract: [0, 200]

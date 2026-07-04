@@ -240,7 +240,7 @@ def cover_and_toc():
         ["Field", "Value"],
         ["Package", "`asw` (Python 3.10+)"],
         ["Repository", "`github.com/SLIMIHamda/refusal_geometry`"],
-        ["Reference commit", "`a1bd9fb` (main; hardened per external review, items 1-4, 6)"],
+        ["Reference commit", "`review-b-rigor` (hardened per external review, items 1-7)"],
         ["Scientific target", "Anti-alignment of refusal directions; geometry-aware steering"],
         ["Compute model", "Kaggle dual-T4 (free tier) + rented A100 (paid 70B point)"],
         ["Document scope", "Methodology, architecture, implementation, and Kaggle execution guide"],
@@ -663,7 +663,8 @@ def build():
         ["Split", "Index range", "Purpose"],
         ["`extract`", "[0, 200)", "Estimate d_refuse (C2) and condition-vector positives (C4)."],
         ["`eval`", "[200, 300)", "Held-out harmful evaluation."],
-        ["`projection`", "[300, 340)", "Held-out activations for the anti-alignment map (C1)."],
+        ["`projection`", "[300, 500)", "Held-out activations for the anti-alignment map (C1); "
+         "widened to n=200 for power (Item 4)."],
     ], [3.0 * cm, 3.0 * cm, CONTENT_W - 6.0 * cm],
         caption="Locked AdvBench splits, defined once in `base.yaml`."))
 
@@ -1107,7 +1108,7 @@ def build():
         ["#", "Command", "Consumes", "Produces"],
         ["0", "`download_benchmarks.py`", "HF datasets", "`data/*.jsonl`"],
         ["1", "`asw extract`", "model + AdvBench[0:200]", "`cache/drefuse/<m>.npz`"],
-        ["2", "`asw geometry-map`", "d_refuse + AdvBench[300:340]", "geometry-map run + labels JSON"],
+        ["2", "`asw geometry-map`", "d_refuse + AdvBench[300:500]", "geometry-map run + labels JSON"],
         ["3", "`asw fit-condition`", "harmful vs benign activations", "`cache/condition/<m>.npz`"],
         ["4", "`asw eval --defense ...`", "caches + benchmark", "eval run + `results/<exp>/<id>.parquet`"],
         ["5", "`asw ablate --axis alpha`", "wrapper + harmful set", "ablation runs (tagged)"],
@@ -1382,9 +1383,9 @@ def build():
 
     story.append(Spacer(1, 10))
     story.append(Paragraph(
-        "<i>This document was generated programmatically from the repository state at commit "
-        "a1bd9fb. Its figures are produced with matplotlib and its layout with reportlab; both "
-        "are regenerable from the accompanying build scripts.</i>", S["caption"]))
+        "<i>This document was generated programmatically from the repository state on the "
+        "review-b-rigor branch. Its figures are produced with matplotlib and its layout with "
+        "reportlab; both are regenerable from the accompanying build scripts.</i>", S["caption"]))
 
     final = cover_and_toc() + story
     doc = DocTpl(str(OUT), pagesize=A4, leftMargin=1.8 * cm, rightMargin=1.8 * cm,

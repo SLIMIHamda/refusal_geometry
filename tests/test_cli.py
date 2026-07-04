@@ -82,6 +82,32 @@ def test_attack_cli_parses_and_dispatches(monkeypatch):
     assert a.budgets == [500, 1000] and a.penalty_lambda == 0.5 and a.limit == 5
 
 
+class _Bench:
+    def __init__(self, n):
+        self._n = n
+
+    def prompts(self):
+        return list(range(self._n))
+
+
+def test_split_warns_on_truncation(capsys):
+    from asw.harness.cli import _split
+
+    cfg = {"splits": {"advbench": {"projection": [300, 500]}}}
+    got = _split(_Bench(100), cfg, "projection")     # only 100 rows available
+    assert got == []                                  # [300:500] of 100 is empty
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "projection" in err and "500" in err
+
+
+def test_split_ok_no_warning(capsys):
+    from asw.harness.cli import _split
+
+    cfg = {"splits": {"advbench": {"projection": [300, 500]}}}
+    got = _split(_Bench(520), cfg, "projection")
+    assert len(got) == 200 and "WARNING" not in capsys.readouterr().err
+
+
 def test_attack_cli_rejects_unknown_attack():
     import asw.harness.cli as cli
 

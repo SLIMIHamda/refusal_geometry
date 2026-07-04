@@ -64,7 +64,12 @@ def _condition_layer(cfg):
 
 def _split(bench, cfg, which):
     lo, hi = cfg["splits"]["advbench"][which]
-    return bench.prompts()[lo:hi]
+    prompts = bench.prompts()
+    if len(prompts) < hi:                    # silent truncation would shrink a pre-registered split
+        print(f"WARNING: advbench has {len(prompts)} prompts but split '{which}' wants [{lo},{hi}); "
+              f"got {len(prompts[lo:hi])}. Download more rows (--limit >= {hi}) to honour the "
+              f"pre-registered split.", file=sys.stderr)
+    return prompts[lo:hi]
 
 
 def _extract(args) -> int:
