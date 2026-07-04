@@ -64,6 +64,30 @@ def fig_refusal_bars(refusal_table, benchmark, path):
     return path
 
 
+def fig_threshold_sweep(sweep, path, *, tau=None):
+    """Detector threshold sensitivity (C4, Item 4): TPR (harmful), FPR (benign), FPR (XSTest) vs τ,
+    with the chosen τ marked. `sweep` is the list of {tau,tpr,fpr_benign,fpr_over} dicts."""
+    if not sweep:
+        return None
+    plt = _plt()
+    taus = [p["tau"] for p in sweep]
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ax.plot(taus, [p.get("tpr") for p in sweep], marker="o", label="TPR (harmful)")
+    ax.plot(taus, [p.get("fpr_benign") for p in sweep], marker="s", label="FPR (benign)")
+    ax.plot(taus, [p.get("fpr_over") for p in sweep], marker="^", label="FPR (XSTest)")
+    if tau is not None:
+        ax.axvline(tau, color="k", ls="--", lw=1, label="chosen τ")
+    ax.set_xlabel("threshold τ")
+    ax.set_ylabel("firing rate")
+    ax.set_ylim(0, 1)
+    ax.set_title("Detector threshold sensitivity (C4)")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
 def fig_asr_vs_budget(attack_table, path):
     """ASR vs query budget, one line per (attack, defense) — the C5 headline curve. The wrapper's
     through-defense curve sitting below the undefended one is the defense claim (Item 6)."""

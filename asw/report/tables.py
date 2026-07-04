@@ -296,6 +296,38 @@ def table_validation(runs):
     return pd.DataFrame(rows)[cols] if rows else _empty(cols)
 
 
+# ── detector characterization (Review B, item 4) ──────────────────────────────
+def table_detector(runs):
+    """Held-out detector quality per model from the latest fit-condition run: ROC-AUC, TPR/FPR at
+    the chosen tau, and — the number reviewers ask for — the FPR on XSTest (over-refusal firing).
+    Train separation accuracy is kept only as a reference column."""
+    import pandas as pd
+
+    cols = ["model_id", "condition_layer", "tau", "train_sep_acc", "heldout_auc", "heldout_tpr",
+            "heldout_fpr", "xstest_fpr", "n_heldout_harmful", "n_xstest"]
+    if runs.empty:
+        return _empty(cols)
+    sub = runs[(runs["kind"] == "fit-condition") & (runs["status"] == "completed")]
+    rows = []
+    for mid, g in sub.groupby("model_id"):
+        m = g.sort_values("started_at").iloc[-1]["metrics"]
+        if "heldout_auc" not in m:                 # pre-Item-4 run without characterization
+            continue
+        rows.append({c: m.get(c) for c in cols if c != "model_id"} | {"model_id": mid})
+    return pd.DataFrame(rows)[cols] if rows else _empty(cols)
+
+
+def latest_threshold_sweep(runs):
+    """(sweep_list, tau) from the latest fit-condition run, or (None, None)."""
+    if runs.empty:
+        return None, None
+    sub = runs[(runs["kind"] == "fit-condition") & (runs["status"] == "completed")]
+    if sub.empty:
+        return None, None
+    m = sub.sort_values("started_at").iloc[-1]["metrics"]
+    return m.get("threshold_sweep"), m.get("tau")
+
+
 # ── scorer adjudication (Review B, item 7) ────────────────────────────────────
 def disagreements(runs, results_dir, *, a: str = "rubric", b: str = "hf_classifier",
                   temperature=0.0):

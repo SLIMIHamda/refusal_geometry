@@ -49,6 +49,13 @@ def build_report(db_path, out_dir, *, judge: str = "rubric", temperature=0.0) ->
     # d_refuse construct validity (Item 2)
     section("d_refuse construct validity (Item 2)", tables.table_validation(runs), "validation.csv")
 
+    # detector characterization (Item 4): held-out AUC / TPR / FPR + XSTest FPR + threshold sweep
+    detector = tables.table_detector(runs)
+    sweep, tau = tables.latest_threshold_sweep(runs)
+    det_fig = figures.fig_threshold_sweep(sweep, fdir / "detector_threshold.png", tau=tau) \
+        if not detector.empty else None
+    section("Detector characterization (Item 4)", detector, "detector.csv", det_fig)
+
     # main results — refusal rate by defense (prompt-clustered CI from the per-run parquet)
     refusal = tables.table_refusal(runs, judge=judge, temperature=temperature,
                                    results_dir=Path(db_path).parent)

@@ -158,31 +158,57 @@ def _models_verify(args) -> int:
 
 
 def _fit_condition(args) -> int:
+    import numpy as np
+
     from .. import db as dbm
     from ..data.benchmarks import load_benchmark
     from ..geometry.extract import capture_terminal
     from ..models.loader import load_model, model_commit_hash
     from ..runlog import run_context
-    from ..wrapper.condition import ConditionVector
+    from ..wrapper.condition import ConditionVector, roc_auc, threshold_sweep, tpr_fpr
 
     cfg = load_config(args.config)
     con = dbm.connect(cfg["paths"]["results_db"])
     cl = _condition_layer(cfg)
-    harmful = _split(load_benchmark("advbench", data_dir=cfg["paths"]["data_dir"]), cfg, "extract")
-    benign = load_benchmark(args.benign, data_dir=cfg["paths"]["data_dir"],
-                            limit=len(harmful)).prompts()
+    advbench = load_benchmark("advbench", data_dir=cfg["paths"]["data_dir"])
+    harmful = _split(advbench, cfg, "extract")
+    # benign: first block trains the detector, a DISJOINT next block is held-out (Item 4)
+    benign_all = load_benchmark(args.benign, data_dir=cfg["paths"]["data_dir"],
+                                limit=2 * len(harmful)).prompts()
+    benign, benign_ho = benign_all[:len(harmful)], benign_all[len(harmful):]
+    harmful_ho = _split(advbench, cfg, "eval")                 # disjoint held-out harmful
+    try:                                                       # benign-but-scary (over-refusal)
+        xstest = load_benchmark("xstest", data_dir=cfg["paths"]["data_dir"],
+                                limit=args.xstest_limit).prompts()
+    except Exception:                                          # noqa: BLE001 - optional set
+        xstest = []
     model, tok = load_model(cfg, quant=args.quant)
     with run_context(con, experiment="fit-condition", model_id=cfg["model"]["id"],
                      config=cfg, seed=0, model_hash=model_commit_hash(model)) as h:
+        def score(prompts):
+            return (cv.score(capture_terminal(model, tok, prompts, [cl])[cl])
+                    if prompts else np.array([]))
+
         ha = capture_terminal(model, tok, harmful, [cl])[cl]
         ba = capture_terminal(model, tok, benign, [cl])[cl]
         cv = ConditionVector.fit(ha, ba)
         path = _condition_path(cfg)
         cv.save(path)
         acc = 0.5 * float(cv.predict(ha).mean()) + 0.5 * float((~cv.predict(ba)).mean())
-        h["metrics"] = {"condition_layer": cl, "train_sep_acc": acc,
-                        "n_harmful": len(harmful), "n_benign": len(benign), "cache": str(path)}
-    print(f"[fit-condition] layer {cl}: train separation acc={acc:.3f} -> {path}")
+        # held-out characterization: AUC + TPR/FPR at tau + XSTest FPR + a threshold sweep (Item 4)
+        sh, sb, sx = score(harmful_ho), score(benign_ho), score(xstest)
+        auc = roc_auc(sh, sb)
+        tpr, fpr = tpr_fpr(sh, sb, cv.threshold)
+        xstest_fpr = float((sx > cv.threshold).mean()) if sx.size else float("nan")
+        taus = [cv.threshold * s for s in (0.8, 0.9, 1.0, 1.1, 1.2)]
+        h["metrics"] = {"condition_layer": cl, "train_sep_acc": acc, "tau": cv.threshold,
+                        "n_harmful": len(harmful), "n_benign": len(benign),
+                        "n_heldout_harmful": len(harmful_ho), "n_heldout_benign": len(benign_ho),
+                        "n_xstest": len(xstest), "heldout_auc": auc, "heldout_tpr": tpr,
+                        "heldout_fpr": fpr, "xstest_fpr": xstest_fpr,
+                        "threshold_sweep": threshold_sweep(sh, sb, sx, taus), "cache": str(path)}
+    print(f"[fit-condition] layer {cl}: train acc={acc:.3f}  held-out AUC={auc:.3f}  "
+          f"TPR={tpr:.3f} FPR={fpr:.3f}  XSTest-FPR={xstest_fpr:.3f} -> {path}")
     return 0
 
 
@@ -580,9 +606,11 @@ def main(argv=None) -> int:
     gm.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
     gm.set_defaults(func=_geometry_map)
 
-    fc = sub.add_parser("fit-condition", help="fit the harmful-input condition vector (C4)")
+    fc = sub.add_parser("fit-condition", help="fit + characterize the harmful-input detector (C4)")
     fc.add_argument("--config", required=True)
     fc.add_argument("--benign", default="orbench", help="benign benchmark for the negatives")
+    fc.add_argument("--xstest-limit", type=int, default=200,
+                    help="XSTest prompts for the over-refusal FPR (Item 4)")
     fc.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
     fc.set_defaults(func=_fit_condition)
 

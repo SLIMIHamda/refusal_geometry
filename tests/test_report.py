@@ -187,6 +187,42 @@ def test_build_report_includes_attacks(tmp_path):
     assert (out / "tables" / "attacks.csv").exists()
 
 
+def test_table_detector_and_sweep(tmp_path):
+    con = dbm.connect(tmp_path / "r.sqlite")
+    sweep = [{"tau": 0.4, "tpr": 0.98, "fpr_benign": 0.10, "fpr_over": 0.30},
+             {"tau": 0.5, "tpr": 0.95, "fpr_benign": 0.05, "fpr_over": 0.20},
+             {"tau": 0.6, "tpr": 0.90, "fpr_benign": 0.02, "fpr_over": 0.12}]
+    metrics = {"condition_layer": 15, "tau": 0.5, "train_sep_acc": 0.99, "heldout_auc": 0.97,
+               "heldout_tpr": 0.95, "heldout_fpr": 0.05, "xstest_fpr": 0.20,
+               "n_heldout_harmful": 100, "n_heldout_benign": 100, "n_xstest": 200,
+               "threshold_sweep": sweep}
+    dbm.upsert_run(con, {"run_id": "fc0", "experiment": "fit-condition", "model_id": "A",
+                         "seed": 0, "status": "completed", "started_at": "2026-01-03",
+                         "config_json": "{}", "metrics_json": json.dumps(metrics)})
+    runs = load_runs(tmp_path / "r.sqlite")
+    t = tables.table_detector(runs)
+    row = t.iloc[0]
+    assert row["model_id"] == "A" and abs(row["heldout_auc"] - 0.97) < 1e-9
+    assert abs(row["xstest_fpr"] - 0.20) < 1e-9        # the over-refusal number
+    sw, tau = tables.latest_threshold_sweep(runs)
+    assert tau == 0.5 and len(sw) == 3
+
+
+def test_build_report_includes_detector(tmp_path):
+    con = dbm.connect(tmp_path / "r.sqlite")
+    metrics = {"condition_layer": 15, "tau": 0.5, "train_sep_acc": 0.99, "heldout_auc": 0.97,
+               "heldout_tpr": 0.95, "heldout_fpr": 0.05, "xstest_fpr": 0.20,
+               "n_heldout_harmful": 100, "n_xstest": 200,
+               "threshold_sweep": [{"tau": 0.5, "tpr": 0.95, "fpr_benign": 0.05, "fpr_over": 0.2}]}
+    dbm.upsert_run(con, {"run_id": "fc0", "experiment": "fit-condition", "model_id": "A",
+                         "seed": 0, "status": "completed", "started_at": "2026-01-03",
+                         "config_json": "{}", "metrics_json": json.dumps(metrics)})
+    out = build_report(tmp_path / "r.sqlite", tmp_path / "rep")
+    md = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "Detector characterization" in md
+    assert (out / "tables" / "detector.csv").exists()
+
+
 def test_disagreements_and_adjudication(tmp_path):
     con = dbm.connect(tmp_path / "r.sqlite")
     rdir = tmp_path
