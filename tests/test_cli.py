@@ -58,6 +58,12 @@ def test_ablation_points_layers():
     assert pts[1][1] == {"alpha": 8.0, "layers": [13, 14, 15, 16]}
 
 
+def test_ablation_points_neutral_op():
+    pts = _ablation_points("neutral_op", alpha=8.0, alphas=[], layer_sets=[])
+    assert [lbl for lbl, _ in pts] == ["neutral=project", "neutral=raw_add", "neutral=skip"]
+    assert pts[2][1] == {"alpha": 8.0, "neutral_op": "skip"}
+
+
 def test_ablation_points_bad_axis():
     with pytest.raises(SystemExit):
         _ablation_points("nonsense", alpha=8.0, alphas=[], layer_sets=[])

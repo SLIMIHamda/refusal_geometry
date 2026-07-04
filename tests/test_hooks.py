@@ -9,6 +9,7 @@ except Exception:  # ImportError or OSError (broken DLLs)
     pytest.skip("torch unavailable on this host", allow_module_level=True)
 
 from asw.models.hooks import Ablator, ActivationCapture, Steerer
+from asw.wrapper.steer import WrapperSteer
 
 
 class ToyBlock(nn.Module):
@@ -77,6 +78,16 @@ def test_ablator_removes_direction_component():
         out = m(x)
     assert torch.allclose(out[..., 0], torch.zeros(1, 2))          # d-component projected out
     assert torch.allclose(out[..., 1], torch.full((1, 2), 5.0))    # orthogonal untouched
+
+
+def test_wrappersteer_skip_branch_is_noop():
+    # Item 5: a 'skip' neutral layer leaves the residual untouched; a raw_add layer still steers.
+    m = ToyModel()
+    x = torch.zeros(1, 2, 4)
+    v = torch.tensor([1.0, 0, 0, 0])
+    with WrapperSteer(m, {1: v, 2: v}, {1: "skip", 2: "raw_add"}, alpha=3.0):
+        out = m(x)
+    assert torch.allclose(out, torch.tensor([3.0, 0, 0, 0]).expand(1, 2, 4))  # only layer 2 added
 
 
 def test_ablator_row_mask_protects_rows():

@@ -337,9 +337,11 @@ def _load_geometry_amap(cfg):
     return {int(k): {"label": v} for k, v in labels.items()}
 
 
-def _build_wrapper(cfg, model, tok, d, alpha, *, layers=None, use_condition=True, force_op=None):
+def _build_wrapper(cfg, model, tok, d, alpha, *, layers=None, use_condition=True, force_op=None,
+                   neutral_op="project"):
     """The geometry-aware wrapper, with optional layer-band restriction, condition toggle (the
-    two ablation knobs beyond alpha), and a forced operator (for the crossover interaction)."""
+    two ablation knobs beyond alpha), a forced operator (for the crossover interaction), and a
+    neutral-layer operator (the 3-way micro-ablation, Item 5)."""
     from ..wrapper.condition import ConditionVector
     from ..wrapper.wrapper import Wrapper
 
@@ -355,7 +357,7 @@ def _build_wrapper(cfg, model, tok, d, alpha, *, layers=None, use_condition=True
             raise SystemExit(f"wrapper needs the condition vector; run `asw fit-condition` ({cp})")
         cond, cl = ConditionVector.load(cp), _condition_layer(cfg)
     return Wrapper.from_geometry_map(model, tok, d, amap, alpha, force_op=force_op,
-                                     condition=cond, condition_layer=cl)
+                                     neutral_op=neutral_op, condition=cond, condition_layer=cl)
 
 
 def _ablation_points(axis, *, alpha, alphas, layer_sets):
@@ -368,6 +370,9 @@ def _ablation_points(axis, *, alpha, alphas, layer_sets):
     if axis == "layers":
         return [("layers=" + ",".join(map(str, ls)), {"alpha": alpha, "layers": list(ls)})
                 for ls in layer_sets]
+    if axis == "neutral_op":
+        return [(f"neutral={op}", {"alpha": alpha, "neutral_op": op})
+                for op in ("project", "raw_add", "skip")]
     raise SystemExit(f"unknown ablation axis '{axis}'")
 
 
@@ -712,7 +717,8 @@ def main(argv=None) -> int:
     ab = sub.add_parser("ablate", help="sweep one wrapper ablation axis (C4 ablations)")
     ab.add_argument("--config", required=True)
     ab.add_argument("--benchmark", required=True)
-    ab.add_argument("--axis", required=True, choices=["alpha", "layers", "condition"])
+    ab.add_argument("--axis", required=True,
+                    choices=["alpha", "layers", "condition", "neutral_op"])
     ab.add_argument("--alpha", type=float, default=8.0, help="fixed alpha for layers/condition axes")
     ab.add_argument("--alphas", type=float, nargs="*", default=[2, 4, 8, 16])
     ab.add_argument("--layer-sets", nargs="*", default=None,

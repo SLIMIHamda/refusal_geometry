@@ -13,9 +13,16 @@ from __future__ import annotations
 import numpy as np
 
 
-def branch_for_label(label: str) -> str:
-    """Pick the operator from a geometry label (from projection.classify_geometry)."""
-    return "raw_add" if label == "anti-aligned" else "project"
+def branch_for_label(label: str, neutral_op: str = "project") -> str:
+    """Pick the operator from a geometry label (from projection.classify_geometry). Anti-aligned
+    gets raw_add, aligned gets project-amplify; NEUTRAL layers use `neutral_op` — swept in the
+    3-way micro-ablation (project vs raw_add vs skip, Item 5) to justify their treatment with data
+    rather than assertion."""
+    if label == "anti-aligned":
+        return "raw_add"
+    if label == "neutral":
+        return neutral_op
+    return "project"
 
 
 def _unit(d):
@@ -34,6 +41,11 @@ def op_project_amplify(h, d, alpha: float) -> np.ndarray:
     dh = _unit(d)
     comp = h @ dh
     return h + alpha * comp[..., None] * dh
+
+
+def op_skip(h, d, alpha: float) -> np.ndarray:
+    """Identity: leave the residual stream untouched (the 'skip' branch for neutral layers)."""
+    return np.asarray(h, dtype=float)
 
 
 class WrapperSteer:
@@ -62,6 +74,8 @@ class WrapperSteer:
 
         def hook(_m, _i, out):
             h = hidden_of(out)
+            if branch == "skip":                 # neutral-layer no-op (Item 5 micro-ablation)
+                return out
             dh = torch.as_tensor(d, device=h.device, dtype=h.dtype)
             dh = dh / dh.norm()
             if branch == "raw_add":

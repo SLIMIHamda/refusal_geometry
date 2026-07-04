@@ -65,15 +65,16 @@ class Wrapper:
 
     @classmethod
     def from_geometry_map(cls, model, tok, d_by_layer, anti_alignment_map, alpha,
-                          *, force_op=None, **kw):
+                          *, force_op=None, neutral_op="project", **kw):
         """Build branch assignments from a per-layer anti-alignment map (classify_geometry).
 
-        `force_op` in {"raw_add", "project"} overrides the geometry-chosen operator on every band
-        layer; running the wrapper forced to each operator on both aligned and anti-aligned models
-        yields the clean operator x geometry conditions for the crossover interaction (Item 4)."""
+        `force_op` in {"raw_add", "project", "skip"} overrides the geometry-chosen operator on every
+        band layer (the clean operator x geometry conditions for the crossover interaction, Item 4).
+        `neutral_op` sets what NEUTRAL layers get (project | raw_add | skip) — the 3-way micro-
+        ablation that justifies their treatment with data (Item 5)."""
         from .steer import branch_for_label
 
         keys = {int(k) for k in d_by_layer}
-        branch = {int(l): (force_op or branch_for_label(v["label"]))
+        branch = {int(l): (force_op or branch_for_label(v["label"], neutral_op=neutral_op))
                   for l, v in anti_alignment_map.items() if int(l) in keys}
         return cls(model, tok, d_by_layer, branch, alpha, **kw)

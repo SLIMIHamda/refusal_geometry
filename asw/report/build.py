@@ -66,7 +66,7 @@ def build_report(db_path, out_dir, *, judge: str = "rubric", temperature=0.0) ->
     section("Refusal rate by defense (main results)", refusal, "refusal.csv", refusal_fig)
 
     # ablations
-    for axis in ("alpha", "layers", "condition"):
+    for axis in ("alpha", "layers", "condition", "neutral_op"):
         at = tables.table_ablation(runs, axis, judge=judge, temperature=temperature)
         fig = figures.fig_alpha_tradeoff(at, fdir / "alpha_tradeoff.png") if axis == "alpha" else None
         section(f"Ablation: {axis}", at, f"ablation_{axis}.csv", fig)
