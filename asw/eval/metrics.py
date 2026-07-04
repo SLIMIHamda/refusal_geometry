@@ -96,6 +96,23 @@ def cluster_bootstrap_rate_ci(df, *, cluster: str = "prompt_id", value: str = "r
     return rate, float(lo), float(hi), int(n_clusters)
 
 
+# ── pre-registered alpha selection (Review B, item 3) ─────────────────────────
+def select_alpha(points):
+    """Pick the steering strength alpha that maximises (harmful-refusal − over-refusal) on the
+    TUNING split — the pre-registered selection rule (Item 3). Ties resolve to the SMALLEST alpha
+    (least intervention). `points` is a list of {alpha, refusal_harmful, refusal_over}. Returns the
+    selected alpha, or None if empty. Frozen before the headline HarmBench/XSTest runs, this is what
+    closes the tuning-leakage objection."""
+    best_obj, best_alpha = None, None
+    for p in sorted(points, key=lambda q: q["alpha"]):
+        if p.get("refusal_harmful") is None or p.get("refusal_over") is None:
+            continue
+        obj = p["refusal_harmful"] - p["refusal_over"]
+        if best_obj is None or obj > best_obj + 1e-12:      # strict -> ties keep the smaller alpha
+            best_obj, best_alpha = obj, p["alpha"]
+    return best_alpha
+
+
 # ── seed-level aggregation ────────────────────────────────────────────────────
 def mean_ci(
     values: Sequence[float], alpha: float = 0.05, n_boot: int = 10000, seed: int = 0

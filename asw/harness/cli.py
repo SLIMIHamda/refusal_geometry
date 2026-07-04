@@ -56,6 +56,28 @@ def _geometry_labels_path(cfg):
             / f"{dbm.safe_name(cfg['model']['id'])}.json")
 
 
+def _alpha_cache_path(cfg):
+    from .. import db as dbm
+
+    return (Path(cfg["paths"]["cache_dir"]) / "alpha"
+            / f"{dbm.safe_name(cfg['model']['id'])}.json")
+
+
+def _read_selected_alpha(cfg):
+    """The pre-registered selected alpha for this model, or None (Item 3)."""
+    p = _alpha_cache_path(cfg)
+    if not p.exists():
+        return None
+    return json.loads(p.read_text(encoding="utf-8")).get("selected_alpha")
+
+
+def _write_selected_alpha(cfg, alpha, meta):
+    p = _alpha_cache_path(cfg)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"selected_alpha": alpha, **meta}, indent=2), encoding="utf-8")
+    return p
+
+
 def _condition_layer(cfg):
     """Layer the harmful-input detector reads. Configurable; default = mid steering band."""
     sl = cfg["model"]["steer_layers"]
@@ -364,6 +386,13 @@ def _eval(args) -> int:
     if force_op and args.defense != "wrapper":
         raise SystemExit("--force-op only applies to --defense wrapper")
     gen = _build_generator(cfg, model, tok, args.defense, args.alpha, force_op=force_op)
+    # pre-registration guard (Item 3): a steered headline run must use the frozen selected alpha
+    if args.defense in ("wrapper", "cast", "abliteration") and not getattr(args, "force_alpha", False):
+        sel = _read_selected_alpha(cfg)
+        if sel is not None and abs(float(sel) - args.alpha) > 1e-9:
+            print(f"WARNING: alpha={args.alpha} != pre-registered selected alpha {sel} "
+                  f"({_alpha_cache_path(cfg)}); alpha must be frozen on the tuning split before "
+                  f"headline runs (pass --force-alpha to silence).", file=sys.stderr)
     # fold the defense (and forced operator) into the config so its hash distinguishes the run
     if args.defense and args.defense != "none":
         spec = {"kind": args.defense, "alpha": args.alpha}
@@ -417,10 +446,19 @@ def _ablate(args) -> int:
     if args.hf_judge:
         judges["hf_classifier"] = HFClassifierJudge()
     seeds = args.seeds if args.seeds else cfg["seeds"]
-    print(f"[ablate] axis={args.axis} points={len(points)} seeds={seeds}")
+    # alpha pre-registration (Item 3): with --select-over, also score the over-refusal benchmark per
+    # alpha and freeze the argmax of (harmful-refusal - over-refusal) to cache/alpha/<model>.json.
+    select = args.axis == "alpha" and args.select_over
+    over_bench = (load_benchmark(args.select_over, data_dir=cfg["paths"]["data_dir"],
+                                 limit=args.limit) if select else None)
+    rt_key = f"refusal_rate.rubric.T{cfg['decoding']['temperatures'][0]}"
+    sel_points = []
+    print(f"[ablate] axis={args.axis} points={len(points)} seeds={seeds}"
+          + (f" select-over={args.select_over}" if select else ""))
     for label, kw in points:
         gen = _build_wrapper(cfg, model, tok, d, **kw)
         acfg = {**cfg, "ablation": {"axis": args.axis, "point": label, **kw}}
+        harmful_rate = None
         for seed in seeds:
             metrics = evaluate_benchmark(
                 con, generator=gen, benchmark=bench, model_id=cfg["model"]["id"],
@@ -428,10 +466,30 @@ def _ablate(args) -> int:
                 results_dir=cfg["paths"]["results_dir"],
                 model_revision=cfg["model"].get("revision"), model_hash=mh,
                 experiment_tag=f"ablate-{args.axis}:{label}")
+            if seed == seeds[0]:
+                harmful_rate = metrics.get(rt_key, {}).get("rate")
             for key, val in metrics.items():
                 if key.startswith("refusal_rate"):
                     print(f"[ablate] {label:18s} seed={seed} {key}={val['rate']:.3f} "
                           f"CI=[{val['ci_lo']:.3f},{val['ci_hi']:.3f}]")
+        if select:
+            om = evaluate_benchmark(
+                con, generator=gen, benchmark=over_bench, model_id=cfg["model"]["id"],
+                config={**acfg, "select_over": args.select_over}, seed=seeds[0], judges=judges,
+                decoding=cfg["decoding"], results_dir=cfg["paths"]["results_dir"],
+                model_revision=cfg["model"].get("revision"), model_hash=mh,
+                experiment_tag=f"ablate-alpha-over:{label}")
+            sel_points.append({"alpha": kw["alpha"], "refusal_harmful": harmful_rate,
+                               "refusal_over": om.get(rt_key, {}).get("rate")})
+    if select and sel_points:
+        from ..eval.metrics import select_alpha
+        chosen = select_alpha(sel_points)
+        path = _write_selected_alpha(cfg, chosen, {"tuning_harmful": args.benchmark,
+                                                   "tuning_over": args.select_over,
+                                                   "objective": "refusal_harmful - refusal_over",
+                                                   "points": sel_points})
+        print(f"[ablate] pre-registered selected alpha = {chosen} (max harmful-refusal − "
+              f"over-refusal on {args.benchmark}/{args.select_over}) -> {path}")
     return 0
 
 
@@ -647,6 +705,8 @@ def main(argv=None) -> int:
     ev.add_argument("--limit", type=int, default=None)
     ev.add_argument("--seeds", type=int, nargs="*", default=None)
     ev.add_argument("--hf-judge", action="store_true")
+    ev.add_argument("--force-alpha", action="store_true",
+                    help="silence the pre-registered-alpha mismatch warning (Item 3)")
     ev.set_defaults(func=_eval)
 
     ab = sub.add_parser("ablate", help="sweep one wrapper ablation axis (C4 ablations)")
@@ -657,6 +717,9 @@ def main(argv=None) -> int:
     ab.add_argument("--alphas", type=float, nargs="*", default=[2, 4, 8, 16])
     ab.add_argument("--layer-sets", nargs="*", default=None,
                     help='for --axis layers, e.g. "13,14" "13,14,15,16"')
+    ab.add_argument("--select-over", default=None,
+                    help="for --axis alpha: over-refusal benchmark; freezes the argmax of "
+                         "(harmful-refusal − over-refusal) to cache/alpha/<model>.json (Item 3)")
     ab.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
     ab.add_argument("--limit", type=int, default=None)
     ab.add_argument("--seeds", type=int, nargs="*", default=None)

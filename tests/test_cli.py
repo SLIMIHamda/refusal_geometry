@@ -108,6 +108,15 @@ def test_split_ok_no_warning(capsys):
     assert len(got) == 200 and "WARNING" not in capsys.readouterr().err
 
 
+def test_alpha_cache_roundtrip(tmp_path):
+    from asw.harness.cli import _read_selected_alpha, _write_selected_alpha
+
+    cfg = {"paths": {"cache_dir": str(tmp_path)}, "model": {"id": "x/y"}}
+    assert _read_selected_alpha(cfg) is None                       # no cache yet
+    p = _write_selected_alpha(cfg, 4.0, {"tuning_harmful": "advbench-eval"})
+    assert p.exists() and _read_selected_alpha(cfg) == 4.0
+
+
 def test_attack_cli_rejects_unknown_attack():
     import asw.harness.cli as cli
 

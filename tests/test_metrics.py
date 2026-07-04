@@ -43,6 +43,15 @@ def test_cluster_bootstrap_widens_vs_pooled():
     assert (hi - lo) > (cp_hi - cp_lo)                  # clustering is less confident, correctly
 
 
+def test_select_alpha_maximizes_margin_ties_to_smaller():
+    pts = [{"alpha": 2, "refusal_harmful": 0.60, "refusal_over": 0.10},   # margin .50
+           {"alpha": 4, "refusal_harmful": 0.90, "refusal_over": 0.20},   # margin .70  <- best
+           {"alpha": 8, "refusal_harmful": 0.95, "refusal_over": 0.25}]   # margin .70  (tie)
+    assert M.select_alpha(pts) == 4                       # tie -> smaller alpha (less intervention)
+    assert M.select_alpha([{"alpha": 2, "refusal_harmful": None, "refusal_over": 0.1}]) is None
+    assert M.select_alpha([]) is None
+
+
 def test_cluster_bootstrap_degenerate_cases():
     import pandas as pd
 
