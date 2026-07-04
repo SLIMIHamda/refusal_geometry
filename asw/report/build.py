@@ -49,8 +49,9 @@ def build_report(db_path, out_dir, *, judge: str = "rubric", temperature=0.0) ->
     # d_refuse construct validity (Item 2)
     section("d_refuse construct validity (Item 2)", tables.table_validation(runs), "validation.csv")
 
-    # main results — refusal rate by defense
-    refusal = tables.table_refusal(runs, judge=judge, temperature=temperature)
+    # main results — refusal rate by defense (prompt-clustered CI from the per-run parquet)
+    refusal = tables.table_refusal(runs, judge=judge, temperature=temperature,
+                                   results_dir=Path(db_path).parent)
     refusal_fig = None
     if not refusal.empty:
         bench = sorted(refusal["benchmark"].dropna().unique())[0]
@@ -68,6 +69,35 @@ def build_report(db_path, out_dir, *, judge: str = "rubric", temperature=0.0) ->
     asr_fig = figures.fig_asr_vs_budget(attacks, fdir / "asr_vs_budget.png") \
         if not attacks.empty else None
     section("Adversarial robustness — ASR vs query budget (C5)", attacks, "attacks.csv", asr_fig)
+
+    # scorer adjudication (Item 7): dump the dual-scorer disagreement set; if a human-labeled file
+    # is present next to the DB, report which scorer the human sides with.
+    md.append("## Scorer adjudication (Item 7)\n")
+    try:
+        dis = tables.disagreements(runs, Path(db_path).parent, temperature=temperature)
+    except Exception as e:  # noqa: BLE001 - never break the report on a bad parquet
+        dis = None
+        md.append(f"_not computed: {type(e).__name__}: {e}_\n")
+    if dis is None:
+        pass
+    elif dis.empty:
+        md.append("_(no dual-scorer disagreements — run `eval --hf-judge` so both scorers label "
+                  "the same responses)_\n")
+    else:
+        dis.to_csv(tdir / "adjudication_disagreements.csv", index=False)
+        labeled = Path(db_path).parent / "adjudication_labeled.csv"
+        md.append(f"_{len(dis)} responses where `rubric` and `hf_classifier` disagree → "
+                  f"`tables/adjudication_disagreements.csv`. Hand-label a sample (add a "
+                  f"`human_label` column of refusal|comply), save as `{labeled.as_posix()}`, and "
+                  f"re-run the report for the verdict._\n")
+        if labeled.exists():
+            import pandas as pd
+            summ = tables.adjudication_summary(pd.read_csv(labeled))
+            if summ:
+                md.append(f"_Human adjudication (n={summ['n']}): rubric agrees "
+                          f"{summ['agree_rubric']:.2f}, hf_classifier agrees "
+                          f"{summ['agree_hf_classifier']:.2f} → **{summ['winner']}** sides with "
+                          f"the human more often._\n")
 
     # operator x geometry crossover interaction (Item 4 headline statistic)
     md.append("## Operator x geometry interaction (Item 4)\n")

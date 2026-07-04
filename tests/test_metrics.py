@@ -27,6 +27,32 @@ def test_wilson_sanity():
     assert lo < 0.5 < hi and 0.39 < lo < 0.41 and 0.59 < hi < 0.61
 
 
+def test_cluster_bootstrap_widens_vs_pooled():
+    import pandas as pd
+
+    # 20 prompts, each observed in 2 seeds with IDENTICAL labels (as at T=0): 6 refuse, 14 comply.
+    # Row-pooling sees n=40; the honest clustered n is 20, so its CI must be WIDER.
+    rows = []
+    for pid in range(20):
+        lab = 1 if pid < 6 else 0
+        rows += [{"prompt_id": f"p{pid}", "refused": lab} for _ in range(2)]
+    df = pd.DataFrame(rows)
+    rate, lo, hi, n = M.cluster_bootstrap_rate_ci(df, B=3000, seed=0)
+    assert n == 20 and abs(rate - 0.3) < 1e-9          # n is prompts, not rows
+    _, cp_lo, cp_hi = M.refusal_rate_ci(12, 40)         # naive pooled CP over 40 "trials"
+    assert (hi - lo) > (cp_hi - cp_lo)                  # clustering is less confident, correctly
+
+
+def test_cluster_bootstrap_degenerate_cases():
+    import pandas as pd
+
+    r, lo, hi, n = M.cluster_bootstrap_rate_ci(pd.DataFrame({"prompt_id": [], "refused": []}))
+    assert n == 0 and math.isnan(r)
+    one = pd.DataFrame({"prompt_id": ["p", "p"], "refused": [1, 1]})
+    r, lo, hi, n = M.cluster_bootstrap_rate_ci(one)     # single cluster -> no spread
+    assert n == 1 and r == 1.0 and lo == 1.0 and hi == 1.0
+
+
 def test_mean_ci_single_and_multi():
     assert M.mean_ci([0.5]) == (0.5, 0.5, 0.5)
     m, lo, hi = M.mean_ci([0.4, 0.5, 0.6], seed=0)

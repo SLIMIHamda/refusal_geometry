@@ -23,9 +23,14 @@ def _pool(group):
     return p, lo, hi, n
 
 
-def table_refusal(runs, *, judge: str = "rubric", temperature=0.0):
-    """Main results: refusal rate per (model, benchmark, defense), pooled over seeds.
-    Excludes ablation runs."""
+def table_refusal(runs, *, judge: str = "rubric", temperature=0.0, results_dir=None):
+    """Main results: refusal rate per (model, benchmark, defense). Excludes ablation runs.
+
+    The CI is a PROMPT-CLUSTERED bootstrap (resample prompts, not rows) when the per-prompt parquet
+    is reachable (`results_dir` given) — responses to the same prompt across seeds/temps are
+    correlated (identical at T=0), so pooling replicates as independent trials inflates n and
+    understates the interval. Falls back to a pooled Clopper-Pearson when no parquet is available
+    (single-seed-equivalent). `n` is the number of independent prompts under clustering."""
     import pandas as pd
 
     cols = ["model_id", "benchmark", "defense", "refusal_rate", "ci_lo", "ci_hi", "n", "seeds"]
@@ -38,17 +43,51 @@ def table_refusal(runs, *, judge: str = "rubric", temperature=0.0):
         m = r["metrics"].get(key)
         if m:
             rows.append({"model_id": r["model_id"], "benchmark": r["benchmark"],
-                         "defense": r["defense"], "seed": r["seed"], "k": m["k"], "n": m["n"]})
+                         "defense": r["defense"], "seed": r["seed"], "k": m["k"], "n": m["n"],
+                         "experiment": r["experiment"], "run_id": r["run_id"]})
     if not rows:
         return _empty(cols)
     df = pd.DataFrame(rows)
     out = []
     for (mid, bench, defn), g in df.groupby(["model_id", "benchmark", "defense"]):
-        p, lo, hi, n = _pool(g)
+        p, lo, hi, n = _group_ci(g, results_dir, judge=judge, temperature=temperature)
         out.append({"model_id": mid, "benchmark": bench, "defense": defn,
                     "refusal_rate": p, "ci_lo": lo, "ci_hi": hi, "n": n,
                     "seeds": g["seed"].nunique()})
     return pd.DataFrame(out).sort_values(["benchmark", "model_id", "defense"]).reset_index(drop=True)
+
+
+def _group_ci(g, results_dir, *, judge, temperature):
+    """Prompt-clustered bootstrap CI from the per-run parquet when available, else pooled CP."""
+    from ..eval import metrics as M
+
+    if results_dir is not None:
+        frame = _prompt_frame(g, results_dir, judge=judge, temperature=temperature)
+        if frame is not None and not frame.empty:
+            return M.cluster_bootstrap_rate_ci(frame, cluster="prompt_id", value="refused")
+    return _pool(g)
+
+
+def _prompt_frame(g, results_dir, *, judge, temperature):
+    """One 0/1 `refused` row per (prompt, seed) at `temperature`, concatenated across the group's
+    seed-runs. None if no parquet is reachable (triggers the CP fallback)."""
+    import pandas as pd
+
+    from .. import db as dbm
+
+    col = f"label_{judge}"
+    frames = []
+    for _, r in g.iterrows():
+        path = dbm.run_parquet_path(results_dir, r["experiment"], r["run_id"])
+        if not path.exists():
+            continue
+        pq = pd.read_parquet(path)
+        if col not in pq.columns or "prompt_id" not in pq.columns:
+            continue
+        pq = pq[pq["temperature"] == temperature]
+        frames.append(pd.DataFrame({"prompt_id": pq["prompt_id"].astype(str),
+                                    "refused": (pq[col] == "refusal").astype(int)}))
+    return pd.concat(frames, ignore_index=True) if frames else None
 
 
 def table_geometry(runs):
@@ -255,3 +294,57 @@ def table_validation(runs):
                      "natural_dim_cos": _mean("natural_refusal_cos"),
                      "vs_naive_cos": _mean("behavioral_vs_naive_cos")})
     return pd.DataFrame(rows)[cols] if rows else _empty(cols)
+
+
+# ── scorer adjudication (Review B, item 7) ────────────────────────────────────
+def disagreements(runs, results_dir, *, a: str = "rubric", b: str = "hf_classifier",
+                  temperature=0.0):
+    """Every response where scorers `a` and `b` disagree, across eval runs (needs both label
+    columns — i.e. eval ran with --hf-judge). This is the set a human adjudicates: kappa says the
+    scorers agree, not which is right. Columns: model_id, defense, prompt_id, prompt, response,
+    label_<a>, label_<b>."""
+    import pandas as pd
+
+    from .. import db as dbm
+
+    cols = ["model_id", "defense", "prompt_id", "prompt", "response", f"label_{a}", f"label_{b}"]
+    if runs.empty:
+        return _empty(cols)
+    sub = runs[(runs["kind"] == "eval") & (runs["status"] == "completed") & (~runs["is_ablation"])]
+    ca, cb = f"label_{a}", f"label_{b}"
+    frames = []
+    for _, r in sub.iterrows():
+        path = dbm.run_parquet_path(results_dir, r["experiment"], r["run_id"])
+        if not path.exists():
+            continue
+        pq = pd.read_parquet(path)
+        if ca not in pq.columns or cb not in pq.columns:
+            continue
+        pq = pq[(pq["temperature"] == temperature) & (pq[ca] != pq[cb])]
+        if pq.empty:
+            continue
+        out = pd.DataFrame({"model_id": r["model_id"], "defense": r["defense"],
+                            "prompt_id": pq["prompt_id"].astype(str),
+                            "prompt": pq.get("prompt", ""), "response": pq.get("response", ""),
+                            ca: pq[ca], cb: pq[cb]})
+        frames.append(out)
+    return (pd.concat(frames, ignore_index=True).drop_duplicates("prompt_id")
+            if frames else _empty(cols))
+
+
+def adjudication_summary(labeled, *, a: str = "rubric", b: str = "hf_classifier"):
+    """From a hand-labeled disagreement CSV (a `human_label` column of refusal|comply), report how
+    often each scorer sides with the human. Returns None if nothing is usable, else
+    {n, agree_<a>, agree_<b>, winner}."""
+    import pandas as pd
+
+    ca, cb = f"label_{a}", f"label_{b}"
+    if labeled is None or "human_label" not in labeled.columns:
+        return None
+    df = labeled[labeled["human_label"].isin(["refusal", "comply"])]
+    if df.empty or ca not in df.columns or cb not in df.columns:
+        return None
+    agree_a = float((df[ca] == df["human_label"]).mean())
+    agree_b = float((df[cb] == df["human_label"]).mean())
+    winner = a if agree_a > agree_b else (b if agree_b > agree_a else "tie")
+    return {"n": int(len(df)), f"agree_{a}": agree_a, f"agree_{b}": agree_b, "winner": winner}

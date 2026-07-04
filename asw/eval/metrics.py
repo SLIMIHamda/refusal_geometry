@@ -68,6 +68,34 @@ def refusal_rate_ci(
     return p, lo, hi
 
 
+# ── prompt-clustered CI (Review B, item 5) ────────────────────────────────────
+def cluster_bootstrap_rate_ci(df, *, cluster: str = "prompt_id", value: str = "refused",
+                              alpha: float = 0.05, B: int = 2000, seed: int = 0):
+    """Prompt-clustered bootstrap CI for a rate. Returns (rate, lo, hi, n_clusters).
+
+    `df` has one row per replicate (seed x temperature) with a `cluster` id and a 0/1 `value`.
+    Resamples CLUSTERS (prompts) with replacement B times; each resample's rate is the mean over
+    all replicates of the sampled clusters. Responses to the SAME prompt across seeds/temps are
+    correlated (at T=0 they are identical), so pooling replicates as independent Bernoulli trials
+    inflates n and understates the interval — this is the honest CI. Degrades gracefully: one
+    cluster -> lo=hi=rate; it also matches an ordinary bootstrap when there is one row per prompt."""
+    if df is None or len(df) == 0:
+        return float("nan"), float("nan"), float("nan"), 0
+    g = df.groupby(cluster)[value]
+    sums = g.sum().to_numpy(dtype=float)
+    counts = g.count().to_numpy(dtype=float)
+    total = counts.sum()
+    if total == 0:
+        return float("nan"), float("nan"), float("nan"), 0
+    rate = float(sums.sum() / total)
+    n_clusters = sums.size
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n_clusters, size=(B, n_clusters))
+    boots = sums[idx].sum(axis=1) / counts[idx].sum(axis=1)
+    lo, hi = np.percentile(boots, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return rate, float(lo), float(hi), int(n_clusters)
+
+
 # ── seed-level aggregation ────────────────────────────────────────────────────
 def mean_ci(
     values: Sequence[float], alpha: float = 0.05, n_boot: int = 10000, seed: int = 0

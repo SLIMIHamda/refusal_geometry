@@ -63,6 +63,27 @@ def test_table_refusal_pools_seeds_excludes_ablation(tmp_path):
     assert "advbench" not in set(t["benchmark"])  # ablation runs excluded from main table
 
 
+def test_table_refusal_clusters_when_parquet_present(tmp_path):
+    """With per-prompt parquet reachable, the CI is prompt-clustered: n = #prompts (not rows) and
+    the interval is wider than the naive seed-pooled Clopper-Pearson."""
+    con = dbm.connect(tmp_path / "r.sqlite")
+    rdir = tmp_path
+    for seed in (0, 1):                                  # T=0 -> both seeds identical
+        rid = f"none{seed}"
+        rows = [{"prompt_id": f"p{i}", "temperature": 0.0,
+                 "label_rubric": "refusal" if i < 6 else "comply"} for i in range(20)]
+        dbm.write_prompt_rows(rdir, "eval:harmbench", rid, rows)
+        dbm.upsert_run(con, {"run_id": rid, "experiment": "eval:harmbench", "model_id": "A",
+                             "seed": seed, "status": "completed", "started_at": "2026-01-01",
+                             "config_json": json.dumps({"defense": {"kind": "none"}}),
+                             "metrics_json": json.dumps(_em(0.3, 6, 20))})
+    runs = load_runs(tmp_path / "r.sqlite")
+    clustered = tables.table_refusal(runs, results_dir=rdir).iloc[0]
+    pooled = tables.table_refusal(runs).iloc[0]          # no results_dir -> CP fallback
+    assert clustered["n"] == 20 and pooled["n"] == 40     # clustered n is prompts, not rows
+    assert (clustered["ci_hi"] - clustered["ci_lo"]) > (pooled["ci_hi"] - pooled["ci_lo"])
+
+
 def test_table_geometry(tmp_path):
     g = tables.table_geometry(load_runs(_seed(tmp_path / "r.sqlite")))
     assert list(g["layer"]) == [13, 14] and set(g["label"]) == {"anti-aligned"}
@@ -164,6 +185,53 @@ def test_build_report_includes_attacks(tmp_path):
     md = (out / "REPORT.md").read_text(encoding="utf-8")
     assert "Adversarial robustness" in md
     assert (out / "tables" / "attacks.csv").exists()
+
+
+def test_disagreements_and_adjudication(tmp_path):
+    con = dbm.connect(tmp_path / "r.sqlite")
+    rdir = tmp_path
+    rows = []
+    for i in range(6):
+        lr = "refusal" if i < 3 else "comply"
+        lh = lr if i not in (2, 4) else ("comply" if lr == "refusal" else "refusal")
+        rows.append({"prompt_id": f"p{i}", "prompt": f"q{i}", "response": f"r{i}",
+                     "temperature": 0.0, "label_rubric": lr, "label_hf_classifier": lh})
+    dbm.write_prompt_rows(rdir, "eval:harmbench", "run0", rows)
+    dbm.upsert_run(con, {"run_id": "run0", "experiment": "eval:harmbench", "model_id": "A",
+                         "seed": 0, "status": "completed", "started_at": "2026-01-01",
+                         "config_json": json.dumps({"defense": {"kind": "none"}}),
+                         "metrics_json": json.dumps(_em(0.5, 3, 6))})
+    dis = tables.disagreements(load_runs(tmp_path / "r.sqlite"), rdir)
+    assert set(dis["prompt_id"]) == {"p2", "p4"}          # only the two disagreements
+
+    import pandas as pd
+    labeled = pd.DataFrame({"prompt_id": ["p2", "p4"],
+                            "label_rubric": ["refusal", "comply"],
+                            "label_hf_classifier": ["comply", "refusal"],
+                            "human_label": ["refusal", "refusal"]})   # p2→rubric, p4→hf
+    summ = tables.adjudication_summary(labeled)
+    assert summ["n"] == 2 and summ["agree_rubric"] == 0.5 and summ["agree_hf_classifier"] == 0.5
+    assert summ["winner"] == "tie"
+
+
+def test_build_report_adjudication_verdict(tmp_path):
+    import pandas as pd
+
+    con = dbm.connect(tmp_path / "r.sqlite")
+    dbm.write_prompt_rows(tmp_path, "eval:harmbench", "run0",
+                          [{"prompt_id": "p0", "prompt": "q", "response": "r", "temperature": 0.0,
+                            "label_rubric": "refusal", "label_hf_classifier": "comply"}])
+    dbm.upsert_run(con, {"run_id": "run0", "experiment": "eval:harmbench", "model_id": "A",
+                         "seed": 0, "status": "completed", "started_at": "2026-01-01",
+                         "config_json": json.dumps({"defense": {"kind": "none"}}),
+                         "metrics_json": json.dumps(_em(1.0, 1, 1))})
+    pd.DataFrame({"prompt_id": ["p0"], "label_rubric": ["refusal"],
+                  "label_hf_classifier": ["comply"], "human_label": ["refusal"]}).to_csv(
+        tmp_path / "adjudication_labeled.csv", index=False)
+    out = build_report(tmp_path / "r.sqlite", tmp_path / "rep")
+    md = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "Scorer adjudication" in md and "**rubric**" in md   # human sided with rubric
+    assert (out / "tables" / "adjudication_disagreements.csv").exists()
 
 
 def test_table_ablation_alpha(tmp_path):
