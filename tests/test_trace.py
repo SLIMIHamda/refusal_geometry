@@ -2,8 +2,20 @@ import numpy as np
 
 from asw.geometry.trace import (
     aie_grid, aie_ratio, directional_aie_summary, directional_restore, noise_sigma,
-    peak_layer, random_unit_like,
+    peak_layer, random_unit_like, refusal_probability,
 )
+
+
+def test_refusal_probability_definition_is_pinned():
+    # P = summed softmax mass over the refusal-onset id set at the first generated position.
+    logits = np.array([0.0, 10.0, 10.0, 0.0])          # ids 1,2 dominate the softmax
+    assert refusal_probability(logits, [1, 2]) > 0.999
+    # uniform logits -> P = |set| / vocab
+    assert abs(refusal_probability(np.zeros(4), [0, 1]) - 0.5) < 1e-9
+    # AIE is the change in exactly this scalar under restoration
+    p_corrupt = refusal_probability(np.zeros(4), [0])
+    p_restore = refusal_probability(np.array([5.0, 0.0, 0.0, 0.0]), [0])
+    assert p_restore - p_corrupt > 0
 
 
 def test_noise_sigma():

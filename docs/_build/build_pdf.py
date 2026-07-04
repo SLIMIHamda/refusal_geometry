@@ -760,9 +760,13 @@ def build():
         "collapsing the behaviour; then, one (layer, position) at a time, the clean activation at "
         "the " + cc("mlp.down_proj") + " site is restored and the recovery is measured. The "
         "average indirect effect, AIE = P(restore) - P(corrupt), localises the mediating "
-        "band, which should coincide with the steering band the map identifies. The torch "
-        "orchestration (an embedding-noise hook and a restore-patch hook) is isolated; the metric "
-        "helpers are pure and tested."))
+        "band, which should coincide with the steering band the map identifies. Here <b>P is the "
+        "refusal probability at the first generated position</b>: the summed softmax mass over a "
+        "fixed set of refusal-onset token ids (the leading token of &ldquo;I&rdquo;, "
+        "&ldquo;I&rsquo;m&rdquo;, &ldquo;Sorry&rdquo;, &ldquo;As&rdquo;, &hellip;), taken from the "
+        "next-token logits at the end of the prompt (pinned by " + cc("refusal_probability") +
+        "). The torch orchestration (an embedding-noise hook and a restore-patch hook) is isolated; "
+        "the metric helpers are pure and tested."))
     story.append(P(
         "A band-level restore, however, only shows that the <i>layers</i> mediate refusal, not the "
         "<i>direction</i>. The harness therefore adds a <b>directional restore</b> that returns "

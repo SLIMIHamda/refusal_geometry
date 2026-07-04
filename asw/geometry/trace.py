@@ -3,6 +3,11 @@ layer sweep (C3). Protocol from the thesis: corrupt subject-token embeddings wit
 sigma = 3 * std(embeddings); for each (layer, token) restore the clean mlp.down_proj output
 and measure recovery. AIE = P_restore - P_corrupt.
 
+P is defined explicitly (Item 6 of the review): the REFUSAL PROBABILITY at the first generated
+position — the summed softmax mass over a fixed set of refusal-onset token ids (the leading token
+of "I", "I'm", "Sorry", "As", ...; see refusal_token_ids), computed from the next-token logits at
+the end of the prompt. `refusal_probability` pins this so the AIE is reproducible.
+
 Item 3 upgrades this from BAND-level to DIRECTION-level: a *directional* restore returns only
 the d_refuse-component of the (clean - corrupt) delta,
 
@@ -21,7 +26,35 @@ import numpy as np
 PATCH_SITE = "mlp.down_proj"
 
 
+# The first generated token of a refusal typically begins one of these onset words; P sums the
+# model's probability mass over their leading tokens at the first generated position.
+REFUSAL_ONSET_WORDS = ["I", "I'm", "Sorry", "As", "Unfortunately", "Cannot", "No", "It"]
+
+
 # ── pure helpers ──────────────────────────────────────────────────────────────
+def refusal_probability(next_token_logits, refusal_token_ids) -> float:
+    """P for the causal trace (Item 6): refusal mass at the FIRST generated position — the summed
+    softmax probability over `refusal_token_ids`, from the next-token logits at the end of the
+    prompt. AIE = P_restore − P_corrupt is the change in this scalar under restoration. Pure numpy,
+    so the definition is pinned and testable."""
+    logits = np.asarray(next_token_logits, dtype=float)
+    p = np.exp(logits - logits.max())
+    p = p / p.sum()
+    idx = np.asarray(list(refusal_token_ids), dtype=int)
+    return float(p[idx].sum())
+
+
+def refusal_token_ids(tok, words=None) -> list[int]:
+    """Leading token id of each refusal-onset word for this tokenizer — the set P sums over
+    (host; deduplicated). Uses a leading space so the ids match mid-sequence tokenisation."""
+    ids = set()
+    for w in (words or REFUSAL_ONSET_WORDS):
+        enc = tok(" " + w, add_special_tokens=False).input_ids
+        if enc:
+            ids.add(int(enc[0]))
+    return sorted(ids)
+
+
 def noise_sigma(embed_weight, k: float = 3.0) -> float:
     """sigma = k * std(embedding matrix). Accepts numpy or torch (via np.asarray)."""
     return float(k) * float(np.asarray(embed_weight, dtype=float).std())
