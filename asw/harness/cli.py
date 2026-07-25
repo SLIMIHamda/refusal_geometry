@@ -263,17 +263,24 @@ def _validate_drefuse(args) -> int:
     harmful = _split(load_benchmark("advbench", data_dir=cfg["paths"]["data_dir"]), cfg, "eval")
     harmless = load_benchmark(args.benign, data_dir=cfg["paths"]["data_dir"],
                               limit=len(harmful)).prompts()
-    threshold = cfg.get("validation", {}).get("ablation_drop_threshold", 0.40)
+    vcfg = cfg.get("validation", {})
+    threshold = vcfg.get("ablation_drop_threshold", 0.40)
+    fmt_threshold = vcfg.get("format_confound_max", 0.35)
     model, tok = load_model(cfg, quant=args.quant)
     with run_context(con, experiment="validate-drefuse", model_id=cfg["model"]["id"],
                      config=cfg, seed=0, model_hash=model_commit_hash(model)) as h:
         m = run_validation(model, tok, d, harmful=harmful, harmless=harmless, layers=layers,
-                           judge=RubricJudge(), decoding=cfg["decoding"], threshold=threshold)
+                           judge=RubricJudge(), decoding=cfg["decoding"], threshold=threshold,
+                           format_threshold=fmt_threshold)
         h["metrics"] = m
     ab = m["ablation"]
     print(f"[validate] ablation: refusal {ab['refusal_base']:.3f} -> {ab['refusal_ablated']:.3f} "
           f"(drop {ab['refusal_drop']:+.3f} vs threshold {ab['threshold']:.2f})  "
           f"{'PASS' if ab['passes'] else 'FAIL'}")
+    fc = m["format_confound"]
+    print(f"[validate] format confound : worst |cos(d_refuse, d_format)| = {fc['worst']:.3f} "
+          f"(<= {fc['threshold']:.2f})  {'PASS' if fc['passes'] else 'FAIL'}"
+          + ("" if fc["passes"] else "  <- d_refuse is largely sentence-state, not stance"))
     print(f"[validate] template stability : min pairwise cos = {m['template_stability_min']:+.3f}")
     if m.get("natural_teacher_forced_cos"):
         mt = float(np.mean([v for v in m["natural_teacher_forced_cos"].values()]))

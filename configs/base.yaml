@@ -47,6 +47,13 @@ alpha:
 # eval split by >= this margin on an aligned model, else d_refuse is not THE refusal direction.
 validation:
   ablation_drop_threshold: 0.40
+  # Gate on the extraction fix (2026-07-24). |cos(d_refuse, d_format)| must stay at or below
+  # this, where d_format is the pure "the assistant has begun a sentence" axis (compliance
+  # continuation vs bare generation point). The pre-fix estimator — refusal continuation vs the
+  # bare generation point — scored ~0.6 here: a majority-format vector that could not induce
+  # refusal at any alpha, only destroy the model. Contrasting refusal against COMPLIANCE puts
+  # both poles mid-sentence so the component cancels; this is the number that proves it did.
+  format_confound_max: 0.35
 
 # AdvBench splits. projection widened 40 -> 200 for power (Item 4): at n=100 the minimal
 # detectable difference in proportions (alpha=.05, power .8) is ~19 points, so sub-20-point

@@ -333,6 +333,7 @@ def table_validation(runs):
     import pandas as pd
 
     cols = ["model_id", "refusal_base", "refusal_ablated", "refusal_drop", "ablation_pass",
+            "format_confound", "format_pass",
             "template_min_cos", "teacher_forced_cos", "natural_dim_cos", "vs_naive_cos"]
     if runs.empty:
         return _empty(cols)
@@ -341,6 +342,7 @@ def table_validation(runs):
     for mid, g in sub.groupby("model_id"):
         m = g.sort_values("started_at").iloc[-1]["metrics"]
         ab = m.get("ablation", {})
+        fc = m.get("format_confound") or {}          # absent on runs predating the gate
 
         def _mean(key):
             d = m.get(key)
@@ -349,6 +351,8 @@ def table_validation(runs):
         rows.append({"model_id": mid, "refusal_base": ab.get("refusal_base"),
                      "refusal_ablated": ab.get("refusal_ablated"),
                      "refusal_drop": ab.get("refusal_drop"), "ablation_pass": ab.get("passes"),
+                     "format_confound": fc.get("worst", float("nan")),
+                     "format_pass": fc.get("passes"),
                      "template_min_cos": m.get("template_stability_min"),
                      "teacher_forced_cos": _mean("natural_teacher_forced_cos"),
                      "natural_dim_cos": _mean("natural_refusal_cos"),

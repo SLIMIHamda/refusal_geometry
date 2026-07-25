@@ -21,8 +21,8 @@ Numpy kernels live in extract.py and are unit-tested; this module is the torch o
 from __future__ import annotations
 
 from .extract import (
-    REFUSAL_PREFIXES, capture_terminal, cosine, mean_difference_direction, min_pairwise_cosine,
-    naive_dim_direction,
+    CONTRAST_PREFIX_PAIRS, capture_terminal, cosine, format_direction, mean_difference_direction,
+    min_pairwise_cosine, naive_dim_direction,
 )
 
 
@@ -59,15 +59,31 @@ def ablation_test(model, tok, prompts, d_by_layer, judge, decoding, threshold=0.
             "k_base": k_b, "k_ablated": k_a, "n": n_b}
 
 
-def template_stability(model, tok, prompts, layers, prefixes=REFUSAL_PREFIXES):
-    """Min pairwise cosine per layer across directions extracted with paraphrased prefixes.
-    native activations are prefix-independent, so they are captured once."""
-    native = capture_terminal(model, tok, prompts, layers, assistant=None)
-    dirs = {}
-    for pfx in prefixes:
-        refusal = capture_terminal(model, tok, prompts, layers, assistant=pfx)
-        dirs[pfx] = {l: mean_difference_direction(native[l], refusal[l]) for l in layers}
-    return {l: min_pairwise_cosine([dirs[p][l] for p in prefixes]) for l in layers}
+def template_stability(model, tok, prompts, layers, pairs=CONTRAST_PREFIX_PAIRS):
+    """Min pairwise cosine per layer across directions extracted from EACH contrast pair alone.
+
+    Extraction pools all pairs; this asks whether any single surface frame would have given a
+    wildly different direction. A high minimum is what licenses the pooling."""
+    dirs = []
+    for refusal_pfx, comply_pfx in pairs:
+        r = capture_terminal(model, tok, prompts, layers, assistant=refusal_pfx)
+        c = capture_terminal(model, tok, prompts, layers, assistant=comply_pfx)
+        dirs.append({l: mean_difference_direction(c[l], r[l]) for l in layers})
+    return {l: min_pairwise_cosine([d[l] for d in dirs]) for l in layers}
+
+
+def format_confound(model, tok, prompts, layers, d_refuse, threshold=0.35):
+    """|cos(d_refuse, d_format)| per layer, where d_format is the pure "assistant has begun a
+    sentence" axis. THE gate on the extraction fix (Item 2 / the 2026-07-24 defect).
+
+    The pre-fix estimator scored ~0.6 here and could not steer refusal at any strength. Passing
+    means the direction is close to orthogonal to sentence-state, i.e. what it encodes is stance.
+    Absolute value: overlap of either sign is contamination."""
+    d_fmt = format_direction(model, tok, prompts, layers)
+    per_layer = {l: abs(cosine(d_refuse[l], d_fmt[l])) for l in layers}
+    worst = max(per_layer.values())
+    return {"cos_abs": {str(l): v for l, v in per_layer.items()},
+            "worst": worst, "threshold": threshold, "passes": bool(worst <= threshold)}
 
 
 def natural_refusal_direction(model, tok, prompts, layers, judge, decoding, min_group=5):
@@ -112,12 +128,13 @@ def behavioral_vs_naive(model, tok, harmful, harmless, layers, d_forced):
 
 
 def run_validation(model, tok, d_forced, *, harmful, harmless, layers, judge, decoding,
-                   threshold=0.40):
-    """Run all four construct-validity checks; return a JSON-serialisable metrics dict."""
+                   threshold=0.40, format_threshold=0.35):
+    """Run every construct-validity check; return a JSON-serialisable metrics dict."""
     layers = list(layers)
     d_band = {l: d_forced[l] for l in layers}
 
     abl = ablation_test(model, tok, harmful, d_band, judge, decoding, threshold)
+    fmt = format_confound(model, tok, harmful, layers, d_band, threshold=format_threshold)
     templ = template_stability(model, tok, harmful, layers)
     d_nat, nat_counts = natural_refusal_direction(model, tok, harmful + harmless, layers,
                                                   judge, decoding)
@@ -128,6 +145,7 @@ def run_validation(model, tok, d_forced, *, harmful, harmless, layers, judge, de
 
     return {
         "ablation": abl,
+        "format_confound": fmt,
         "template_stability_cos": {str(l): v for l, v in templ.items()},
         "template_stability_min": float(min(templ.values())),
         "natural_refusal_cos": ({str(l): v for l, v in natural.items()} if natural else None),
