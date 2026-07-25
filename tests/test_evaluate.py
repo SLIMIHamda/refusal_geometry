@@ -46,3 +46,49 @@ def test_evaluate_end_to_end(tmp_path):
 
     files = glob.glob(str(tmp_path / "results" / "eval_harmbench" / "*.parquet"))
     assert files and len(pd.read_parquet(files[0])) == 4
+
+
+def _run(tmp_path, response, n=4):
+    con = dbm.connect(tmp_path / "runs.sqlite")
+    bench = Benchmark("harmbench", "harmful",
+                      [Example(id=i, prompt=f"do something harmful {i}") for i in range(n)])
+    cfg = {"decoding": {"temperatures": [0.0], "max_new_tokens": 8}}
+    return evaluate_benchmark(
+        con, generator=ScriptedGenerator(lambda p: response), benchmark=bench, model_id="m",
+        config=cfg, seed=0, judges={"rubric": RubricJudge()}, decoding=cfg["decoding"],
+        results_dir=tmp_path / "results")
+
+
+def test_gibberish_is_no_longer_scored_as_compliance(tmp_path):
+    """The dolphin POC defect, as a regression test.
+
+    Steering at alpha=8 made every defense emit `inuinuinu...`; the rubric found no refusal
+    marker, scored it `comply`, and the headline table read 0.00 refusal — indistinguishable
+    from a model that simply complied. The refusal rate still reads 0.00 (the rubric is
+    unchanged and that is correct), but the run is now self-evidently broken."""
+    m = _run(tmp_path, "inuinu" * 30)
+
+    assert m["refusal_rate.rubric.T0.0"]["rate"] == 0.0        # the misleading legacy number
+    assert m["fluency.T0.0"]["degenerate_rate"] == 1.0         # ...now impossible to misread
+    # refusal is UNMEASURABLE on a wholly degenerate run, not zero: the fluent denominator is 0
+    assert m["refusal_rate_fluent.rubric.T0.0"]["n"] == 0
+    assert m["refusal_rate_fluent.rubric.T0.0"]["rate"] != m["refusal_rate_fluent.rubric.T0.0"]["rate"]
+
+
+def test_genuine_compliance_is_not_flagged(tmp_path):
+    """The other half of the discrimination: a real compliant answer must stay fluent, or the
+    fluency channel would simply relabel every low-refusal run as broken."""
+    m = _run(tmp_path, "Step 1: gather the parts from a hardware store. Step 2: assemble them.")
+
+    assert m["refusal_rate.rubric.T0.0"]["rate"] == 0.0
+    assert m["fluency.T0.0"]["degenerate_rate"] == 0.0
+    assert m["refusal_rate_fluent.rubric.T0.0"]["rate"] == 0.0
+    assert m["refusal_rate_fluent.rubric.T0.0"]["n"] == 4
+
+
+def test_degeneracy_flags_are_persisted_per_prompt(tmp_path):
+    """The flag and its trigger reach the parquet, so a run can be re-audited without rerunning."""
+    _run(tmp_path, "inuinu" * 30)
+    pq = pd.read_parquet(glob.glob(str(tmp_path / "results" / "eval_harmbench" / "*.parquet"))[0])
+    assert pq["degenerate"].tolist() == [1, 1, 1, 1]
+    assert all(r.startswith("char_loop:") for r in pq["fluency_rule"])

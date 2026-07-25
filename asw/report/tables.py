@@ -30,20 +30,30 @@ def table_refusal(runs, *, judge: str = "rubric", temperature=0.0, results_dir=N
     is reachable (`results_dir` given) — responses to the same prompt across seeds/temps are
     correlated (identical at T=0), so pooling replicates as independent trials inflates n and
     understates the interval. Falls back to a pooled Clopper-Pearson when no parquet is available
-    (single-seed-equivalent). `n` is the number of independent prompts under clustering."""
+    (single-seed-equivalent). `n` is the number of independent prompts under clustering.
+
+    `degenerate` and `refusal_fluent` carry the fluency channel into the headline table. A low
+    refusal_rate means one of two very different things — the model complied, or the model was
+    destroyed and its gibberish scored as compliance — and only `degenerate` tells them apart.
+    Both are nan for runs predating the fluency scorer."""
     import pandas as pd
 
-    cols = ["model_id", "benchmark", "defense", "refusal_rate", "ci_lo", "ci_hi", "n", "seeds"]
+    cols = ["model_id", "benchmark", "defense", "refusal_rate", "ci_lo", "ci_hi",
+            "degenerate", "refusal_fluent", "n", "seeds"]
     if runs.empty:
         return _empty(cols)
     key = _refusal_key(judge, temperature)
+    fkey, flkey = f"fluency.T{temperature}", f"refusal_rate_fluent.{judge}.T{temperature}"
     rows = []
     sub = runs[(runs["kind"] == "eval") & (runs["status"] == "completed") & (~runs["is_ablation"])]
     for _, r in sub.iterrows():
         m = r["metrics"].get(key)
         if m:
+            fl, flu = r["metrics"].get(fkey) or {}, r["metrics"].get(flkey) or {}
             rows.append({"model_id": r["model_id"], "benchmark": r["benchmark"],
                          "defense": r["defense"], "seed": r["seed"], "k": m["k"], "n": m["n"],
+                         "k_deg": fl.get("k"), "n_deg": fl.get("n"),
+                         "k_fluent": flu.get("k"), "n_fluent": flu.get("n"),
                          "experiment": r["experiment"], "run_id": r["run_id"]})
     if not rows:
         return _empty(cols)
@@ -51,10 +61,60 @@ def table_refusal(runs, *, judge: str = "rubric", temperature=0.0, results_dir=N
     out = []
     for (mid, bench, defn), g in df.groupby(["model_id", "benchmark", "defense"]):
         p, lo, hi, n = _group_ci(g, results_dir, judge=judge, temperature=temperature)
+        deg, fluent = _degeneracy(g, results_dir, judge=judge, temperature=temperature)
         out.append({"model_id": mid, "benchmark": bench, "defense": defn,
-                    "refusal_rate": p, "ci_lo": lo, "ci_hi": hi, "n": n,
-                    "seeds": g["seed"].nunique()})
+                    "refusal_rate": p, "ci_lo": lo, "ci_hi": hi,
+                    "degenerate": deg, "refusal_fluent": fluent,
+                    "n": n, "seeds": g["seed"].nunique()})
     return pd.DataFrame(out).sort_values(["benchmark", "model_id", "defense"]).reset_index(drop=True)
+
+
+def _pooled_rate(g, k_col, n_col):
+    """Pool k/n across a group -> rate, or nan when the columns are absent/empty (pre-fluency
+    runs, or a wholly degenerate run whose fluent denominator is legitimately zero)."""
+    if k_col not in g.columns:
+        return float("nan")
+    k, n = g[k_col].sum(skipna=True), g[n_col].sum(skipna=True)
+    return float(k) / float(n) if n and n > 0 else float("nan")
+
+
+def _degeneracy(g, results_dir, *, judge, temperature):
+    """(degenerate_rate, refusal_rate_among_fluent) for a run group.
+
+    Prefers the per-prompt parquet, because that is the only source that can be *backfilled*:
+    runs evaluated before the fluency scorer existed have no fluency keys in their stored metrics,
+    but `scripts/audit_generations.py --write` can add the `degenerate` column to their parquet
+    after the fact. Falls back to the run metrics when no parquet is reachable, and to nan when
+    neither carries the channel."""
+    import pandas as pd
+
+    from .. import db as dbm
+
+    col = f"label_{judge}"
+    if results_dir is not None:
+        frames = []
+        for _, r in g.iterrows():
+            path = dbm.run_parquet_path(results_dir, r["experiment"], r["run_id"])
+            if not path.exists():
+                continue
+            pq = pd.read_parquet(path)
+            if "degenerate" not in pq.columns:
+                continue
+            if "temperature" in pq.columns:
+                pq = pq[pq["temperature"] == temperature]
+            frames.append(pq)
+        if frames:
+            allrows = pd.concat(frames, ignore_index=True)
+            deg = allrows["degenerate"].astype(bool)
+            rate = float(deg.mean()) if len(allrows) else float("nan")
+            fl = allrows[~deg]
+            if col in allrows.columns and len(fl):
+                scored = fl[fl[col].isin(["refusal", "comply"])]
+                fluent = float((scored[col] == "refusal").mean()) if len(scored) else float("nan")
+            else:
+                fluent = float("nan")           # nothing fluent survived -> unmeasurable, not 0
+            return rate, fluent
+    return _pooled_rate(g, "k_deg", "n_deg"), _pooled_rate(g, "k_fluent", "n_fluent")
 
 
 def _group_ci(g, results_dir, *, judge, temperature):

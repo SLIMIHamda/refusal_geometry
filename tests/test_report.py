@@ -63,6 +63,60 @@ def test_table_refusal_pools_seeds_excludes_ablation(tmp_path):
     assert "advbench" not in set(t["benchmark"])  # ablation runs excluded from main table
 
 
+def test_table_refusal_surfaces_degeneracy(tmp_path):
+    """A 0.00 refusal rate must never appear in the headline table without the number that
+    disambiguates it. Reproduces the POC row set: `wrapper` and `none` both read ~0.00, but one
+    was a destroyed model and the other a genuinely compliant one."""
+    con = dbm.connect(tmp_path / "r.sqlite")
+
+    def em(rate, k, n, deg, fluent_rate, n_fluent):
+        return {"refusal_rate.rubric.T0.0": {"rate": rate, "ci_lo": 0, "ci_hi": 1, "k": k, "n": n},
+                "fluency.T0.0": {"degenerate_rate": deg, "k": int(deg * n), "n": n},
+                "refusal_rate_fluent.rubric.T0.0": {"rate": fluent_rate, "ci_lo": 0, "ci_hi": 1,
+                                                    "k": 0, "n": n_fluent}}
+
+    def add(rid, exp, metrics, kind):
+        dbm.upsert_run(con, {"run_id": rid, "experiment": exp, "model_id": "A", "seed": 0,
+                             "status": "completed", "started_at": "2026-01-01",
+                             "config_json": json.dumps({"defense": {"kind": kind}}),
+                             "metrics_json": json.dumps(metrics)})
+
+    add("n0", "eval:harmbench", em(0.03, 3, 100, 0.0, 0.03, 100), "none")
+    add("w0", "eval:harmbench:wrapper", em(0.0, 0, 100, 1.0, float("nan"), 0), "wrapper")
+    add("c0", "eval:harmbench:cast", _em(0.0, 0, 100), "cast")        # pre-fluency legacy run
+
+    t = tables.table_refusal(load_runs(tmp_path / "r.sqlite")).set_index("defense")
+    assert t.loc["none", "refusal_rate"] == t.loc["wrapper", "refusal_rate"] + 0.03  # both ~0
+    assert t.loc["wrapper", "degenerate"] == 1.0        # destroyed
+    assert t.loc["none", "degenerate"] == 0.0           # genuinely compliant
+    # a wholly degenerate run has no fluent denominator -> nan, not a fabricated 0.0
+    assert t.loc["wrapper", "refusal_fluent"] != t.loc["wrapper", "refusal_fluent"]
+    # runs recorded before the fluency scorer existed stay readable, with nan not a crash
+    assert t.loc["cast", "degenerate"] != t.loc["cast", "degenerate"]
+
+
+def test_degeneracy_is_read_from_backfilled_parquet(tmp_path):
+    """`audit_generations.py --write` adds a `degenerate` column to parquet from runs evaluated
+    before the fluency scorer existed. Those runs have NO fluency keys in their stored metrics,
+    so the table has to prefer the parquet — otherwise the backfill would be invisible and the
+    historical 0.00 rows would stay ambiguous forever."""
+    con = dbm.connect(tmp_path / "r.sqlite")
+    rows = [{"prompt_id": f"p{i}", "temperature": 0.0, "label_rubric": "comply",
+             "degenerate": 1, "fluency_rule": "char_loop:0.017"} for i in range(20)]
+    dbm.write_prompt_rows(tmp_path, "eval:harmbench:wrapper", "w0", rows)
+    dbm.upsert_run(con, {"run_id": "w0", "experiment": "eval:harmbench:wrapper", "model_id": "A",
+                         "seed": 0, "status": "completed", "started_at": "2026-01-01",
+                         "config_json": json.dumps({"defense": {"kind": "wrapper"}}),
+                         "metrics_json": json.dumps(_em(0.0, 0, 20))})   # legacy: no fluency keys
+
+    runs = load_runs(tmp_path / "r.sqlite")
+    assert tables.table_refusal(runs).iloc[0]["degenerate"] != \
+        tables.table_refusal(runs).iloc[0]["degenerate"]          # nan without the parquet
+    t = tables.table_refusal(runs, results_dir=tmp_path).iloc[0]
+    assert t["refusal_rate"] == 0.0 and t["degenerate"] == 1.0    # ...and unambiguous with it
+    assert t["refusal_fluent"] != t["refusal_fluent"]             # no fluent rows -> unmeasurable
+
+
 def test_table_refusal_clusters_when_parquet_present(tmp_path):
     """With per-prompt parquet reachable, the CI is prompt-clustered: n = #prompts (not rows) and
     the interval is wider than the naive seed-pooled Clopper-Pearson."""
