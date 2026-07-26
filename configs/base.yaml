@@ -7,6 +7,12 @@ decoding:
   temperatures: [0.0, 0.7]
   max_new_tokens: 256
   top_p: 1.0
+  # Generation chunk size. This is a MEMORY bound: the prefill materialises
+  # [batch, seq, vocab] logits and Llama upcasts them with .float(), so peak VRAM is
+  # batch x seq x 128256 x 4 bytes in ONE allocation on ONE device. At batch=100 that is
+  # 3.68 GiB and OOMs a T4 already holding half the sharded weights; 16 keeps it near 0.6 GiB.
+  # device_map="auto" does not help here — sharding splits weights, not this tensor.
+  batch_size: 16
 
 paths:
   results_db: results/runs.sqlite

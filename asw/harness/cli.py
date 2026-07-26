@@ -301,15 +301,21 @@ def _validate_drefuse(args) -> int:
     return 0
 
 
+def _batch_size(cfg):
+    """Generation chunk size — a VRAM bound, not a speed knob (see HFGenerator's docstring)."""
+    return (cfg.get("decoding") or {}).get("batch_size", 16)
+
+
 def _build_generator(cfg, model, tok, defense, alpha, force_op=None):
     """Construct the Generator for a chosen defense, loading cached artifacts as needed."""
     from .generate import HFGenerator
 
+    bs = _batch_size(cfg)
     if defense in (None, "none"):
-        return HFGenerator(model, tok)
+        return HFGenerator(model, tok, batch_size=bs)
     if defense == "system_prompt":
         from ..baselines.defenses import system_prompt_defense
-        return system_prompt_defense(model, tok)
+        return system_prompt_defense(model, tok, batch_size=bs)
 
     from ..geometry.extract import load_drefuse
     dp = _drefuse_path(cfg)
@@ -319,7 +325,7 @@ def _build_generator(cfg, model, tok, defense, alpha, force_op=None):
 
     if defense == "abliteration":
         from ..baselines.defenses import abliteration_reversal
-        return abliteration_reversal(model, tok, d, alpha)
+        return abliteration_reversal(model, tok, d, alpha, batch_size=bs)
 
     cp = _condition_path(cfg)
     if not cp.exists():
@@ -330,7 +336,7 @@ def _build_generator(cfg, model, tok, defense, alpha, force_op=None):
 
     if defense == "cast":
         from ..baselines.defenses import cast_baseline
-        return cast_baseline(model, tok, d, alpha, cond, cl)
+        return cast_baseline(model, tok, d, alpha, cond, cl, batch_size=bs)
     if defense == "wrapper":
         return _build_wrapper(cfg, model, tok, d, alpha, force_op=force_op)
     raise SystemExit(f"unknown defense '{defense}'")
@@ -364,7 +370,8 @@ def _build_wrapper(cfg, model, tok, d, alpha, *, layers=None, use_condition=True
             raise SystemExit(f"wrapper needs the condition vector; run `asw fit-condition` ({cp})")
         cond, cl = ConditionVector.load(cp), _condition_layer(cfg)
     return Wrapper.from_geometry_map(model, tok, d, amap, alpha, force_op=force_op,
-                                     neutral_op=neutral_op, condition=cond, condition_layer=cl)
+                                     neutral_op=neutral_op, condition=cond, condition_layer=cl,
+                                     batch_size=_batch_size(cfg))
 
 
 def _ablation_points(axis, *, alpha, alphas, layer_sets):

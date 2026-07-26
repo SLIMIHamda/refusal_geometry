@@ -16,7 +16,8 @@ import numpy as np
 
 class Wrapper:
     def __init__(self, model, tok, d_by_layer, branch_by_layer, alpha, *,
-                 condition=None, condition_layer=None, site="block", system_prompt=None):
+                 condition=None, condition_layer=None, site="block", system_prompt=None,
+                 batch_size=16):
         self.model = model
         self.tok = tok
         self.d_by_layer = {int(k): v for k, v in d_by_layer.items()}
@@ -26,6 +27,8 @@ class Wrapper:
         self.condition_layer = condition_layer
         self.site = site
         self.system_prompt = system_prompt
+        self.batch_size = batch_size      # carried through so the wrapper's own generator
+        # respects the same memory bound as the undefended path (see HFGenerator's docstring)
 
     def _mask(self, prompts):
         """Per-row harmful flag from the condition vector; None => steer every row."""
@@ -36,7 +39,8 @@ class Wrapper:
         from ..geometry.extract import capture_terminal
 
         acts = capture_terminal(self.model, self.tok, prompts, [self.condition_layer],
-                                assistant=None)[self.condition_layer]
+                                assistant=None,
+                                batch_size=self.batch_size or 16)[self.condition_layer]
         flags = self.condition.predict(acts)            # numpy bool [N]
         return torch.as_tensor(np.asarray(flags), dtype=torch.bool)
 
@@ -57,7 +61,8 @@ class Wrapper:
         from .steer import WrapperSteer
 
         mask = self._mask(prompts)
-        gen = HFGenerator(self.model, self.tok, system_prompt=self.system_prompt)
+        gen = HFGenerator(self.model, self.tok, system_prompt=self.system_prompt,
+                          batch_size=self.batch_size)
         with WrapperSteer(self.model, self.d_by_layer, self.branch_by_layer,
                           self.alpha, mask=mask, site=self.site):
             return gen.generate(prompts, temperature=temperature,

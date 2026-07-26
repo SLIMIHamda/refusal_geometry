@@ -36,12 +36,22 @@ class HFGenerator:
     `hooks` is a list of forward-hook handles already registered on the model (e.g. the
     wrapper's steering hooks); generation simply runs with them attached. Loading and
     hook registration live in asw/models (Steps 3/8); this class only drives decoding.
+
+    BATCHING IS A MEMORY BOUND, NOT A THROUGHPUT KNOB. The prefill pass materialises logits of
+    shape [batch, seq, vocab] and `LlamaForCausalLM.forward` then calls `logits.float()`, so the
+    peak allocation is batch x seq x vocab x 4 bytes on ONE device. Llama-3's vocab is 128k, so a
+    100-prompt batch at seq~77 asks for 3.68 GiB in a single block and OOMs a 14.5 GiB T4 that is
+    already holding half the sharded weights — which is exactly how the first `asw eval` died.
+    `device_map="auto"` does not help: sharding splits the weights, not this one tensor. Chunking
+    is the fix; 16 keeps the same allocation near 0.6 GiB.
     """
 
-    def __init__(self, model, tokenizer, *, system_prompt: str | None = None):
+    def __init__(self, model, tokenizer, *, system_prompt: str | None = None,
+                 batch_size: int | None = 16):
         self.model = model
         self.tok = tokenizer
         self.system_prompt = system_prompt
+        self.batch_size = batch_size
 
     def _format(self, prompt: str) -> str:
         msgs = []
@@ -54,22 +64,28 @@ class HFGenerator:
         import torch
         from .. import repro
 
-        repro.set_seed(seed)
-        texts = [self._format(p) for p in prompts]
-        enc = self.tok(texts, return_tensors="pt", padding=True, add_special_tokens=False)
-        enc = {k: v.to(self.model.device) for k, v in enc.items()}
+        repro.set_seed(seed)                      # once, so chunking keeps one seeded RNG stream
+        prompts = list(prompts)
         do_sample = temperature and temperature > 0.0
-        with torch.no_grad():
-            out = self.model.generate(
-                **enc,
-                do_sample=do_sample,
-                temperature=temperature if do_sample else None,
-                top_p=1.0,
-                max_new_tokens=max_new_tokens,
-                pad_token_id=self.tok.pad_token_id or self.tok.eos_token_id,
-            )
-        gen = out[:, enc["input_ids"].shape[1]:]
-        return self.tok.batch_decode(gen, skip_special_tokens=True)
+        step = self.batch_size or len(prompts) or 1
+        outs: list[str] = []
+        for i in range(0, len(prompts), step):
+            texts = [self._format(p) for p in prompts[i:i + step]]
+            enc = self.tok(texts, return_tensors="pt", padding=True, add_special_tokens=False)
+            enc = {k: v.to(self.model.device) for k, v in enc.items()}
+            with torch.no_grad():
+                out = self.model.generate(
+                    **enc,
+                    do_sample=do_sample,
+                    temperature=temperature if do_sample else None,
+                    top_p=1.0,
+                    max_new_tokens=max_new_tokens,
+                    pad_token_id=self.tok.pad_token_id or self.tok.eos_token_id,
+                )
+            gen = out[:, enc["input_ids"].shape[1]:]
+            outs.extend(self.tok.batch_decode(gen, skip_special_tokens=True))
+            del enc, out, gen
+        return outs
 
 
 def run_generation(

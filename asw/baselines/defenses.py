@@ -18,10 +18,10 @@ DEFAULT_SAFETY_PROMPT = (
 )
 
 
-def system_prompt_defense(model, tok, system_prompt: str = DEFAULT_SAFETY_PROMPT):
+def system_prompt_defense(model, tok, system_prompt: str = DEFAULT_SAFETY_PROMPT, batch_size=16):
     from ..harness.generate import HFGenerator
 
-    return HFGenerator(model, tok, system_prompt=system_prompt)
+    return HFGenerator(model, tok, system_prompt=system_prompt, batch_size=batch_size)
 
 
 class ClassifierFilter:
@@ -43,19 +43,19 @@ class ClassifierFilter:
         return [self.refusal_text if f else o for o, f in zip(outs, flags)]
 
 
-def abliteration_reversal(model, tok, d_by_layer, alpha):
+def abliteration_reversal(model, tok, d_by_layer, alpha, batch_size=16):
     """Naive undo: unconditional raw re-addition of d_refuse at every band layer."""
     from ..wrapper.wrapper import Wrapper
 
     branch = {int(l): "raw_add" for l in d_by_layer}
-    return Wrapper(model, tok, d_by_layer, branch, alpha, condition=None)
+    return Wrapper(model, tok, d_by_layer, branch, alpha, condition=None, batch_size=batch_size)
 
 
-def cast_baseline(model, tok, d_by_layer, alpha, condition, condition_layer):
+def cast_baseline(model, tok, d_by_layer, alpha, condition, condition_layer, batch_size=16):
     """CAST-style: conditional raw-addition (condition gates a uniform raw add; no geometry
     branch). The direct conceptual competitor to the geometry-aware wrapper (C4)."""
     from ..wrapper.wrapper import Wrapper
 
     branch = {int(l): "raw_add" for l in d_by_layer}
     return Wrapper(model, tok, d_by_layer, branch, alpha,
-                   condition=condition, condition_layer=condition_layer)
+                   condition=condition, condition_layer=condition_layer, batch_size=batch_size)
