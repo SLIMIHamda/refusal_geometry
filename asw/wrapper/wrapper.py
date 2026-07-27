@@ -57,16 +57,28 @@ class Wrapper:
                             self.alpha, mask=mask, site=self.site)
 
     def generate(self, prompts, *, temperature, max_new_tokens, seed):
-        from ..harness.generate import HFGenerator
+        """Condition pre-pass, then chunked generation with the mask sliced per chunk.
+
+        The chunk loop lives HERE rather than inside HFGenerator because the mask is per-row: the
+        steering hook multiplies `delta` by it, so a mask covering all N prompts against a batch of
+        `batch_size` hidden states is a shape error (`tensor a (16) must match tensor b (100)`).
+        Both are cut on the same `chunk_bounds`, so row i of the batch always carries its own flag.
+        """
+        from .. import repro
+        from ..harness.generate import HFGenerator, chunk_bounds
         from .steer import WrapperSteer
 
-        mask = self._mask(prompts)
-        gen = HFGenerator(self.model, self.tok, system_prompt=self.system_prompt,
-                          batch_size=self.batch_size)
-        with WrapperSteer(self.model, self.d_by_layer, self.branch_by_layer,
-                          self.alpha, mask=mask, site=self.site):
-            return gen.generate(prompts, temperature=temperature,
-                                max_new_tokens=max_new_tokens, seed=seed)
+        prompts = list(prompts)
+        mask = self._mask(prompts)                       # full length, or None => steer every row
+        gen = HFGenerator(self.model, self.tok, system_prompt=self.system_prompt)
+        repro.set_seed(seed)                             # once, matching the unwrapped path
+        outs: list[str] = []
+        for lo, hi in chunk_bounds(len(prompts), self.batch_size):
+            with WrapperSteer(self.model, self.d_by_layer, self.branch_by_layer, self.alpha,
+                              mask=(None if mask is None else mask[lo:hi]), site=self.site):
+                outs.extend(gen.generate_batch(prompts[lo:hi], temperature=temperature,
+                                               max_new_tokens=max_new_tokens))
+        return outs
 
     @classmethod
     def from_geometry_map(cls, model, tok, d_by_layer, anti_alignment_map, alpha,

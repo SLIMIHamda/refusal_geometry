@@ -20,6 +20,19 @@ class Generator(Protocol):
     def generate(self, prompts, *, temperature: float, max_new_tokens: int, seed: int): ...
 
 
+def chunk_bounds(n: int, step: int | None):
+    """[(start, stop), ...] covering range(n) in `step`-sized chunks; one chunk if step is None.
+
+    Shared by HFGenerator and Wrapper so that anything sliced alongside the prompts — above all
+    the wrapper's per-row condition mask — is cut on exactly the same boundaries. Keeping this in
+    one pure function is deliberate: when generation was chunked and the mask was not, the hook
+    got a batch of 16 hidden states and a mask of 100 and blew up at `h + delta`."""
+    if n <= 0:
+        return []
+    size = step or n
+    return [(i, min(i + size, n)) for i in range(0, n, size)]
+
+
 class ScriptedGenerator:
     """Test/debug generator: `fn(prompt) -> response`."""
 
@@ -60,31 +73,39 @@ class HFGenerator:
         msgs.append({"role": "user", "content": prompt})
         return self.tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
 
-    def generate(self, prompts, *, temperature, max_new_tokens, seed):
+    def generate_batch(self, prompts, *, temperature, max_new_tokens):
+        """Decode ONE batch. Does not seed — callers that chunk seed once, outside the loop.
+
+        Exposed so the wrapper can drive the chunk loop itself (it has to slice its condition
+        mask on the same boundaries) without duplicating the decode path or re-seeding per chunk.
+        """
         import torch
+
+        texts = [self._format(p) for p in prompts]
+        enc = self.tok(texts, return_tensors="pt", padding=True, add_special_tokens=False)
+        enc = {k: v.to(self.model.device) for k, v in enc.items()}
+        do_sample = temperature and temperature > 0.0
+        with torch.no_grad():
+            out = self.model.generate(
+                **enc,
+                do_sample=do_sample,
+                temperature=temperature if do_sample else None,
+                top_p=1.0,
+                max_new_tokens=max_new_tokens,
+                pad_token_id=self.tok.pad_token_id or self.tok.eos_token_id,
+            )
+        gen = out[:, enc["input_ids"].shape[1]:]
+        return self.tok.batch_decode(gen, skip_special_tokens=True)
+
+    def generate(self, prompts, *, temperature, max_new_tokens, seed):
         from .. import repro
 
         repro.set_seed(seed)                      # once, so chunking keeps one seeded RNG stream
         prompts = list(prompts)
-        do_sample = temperature and temperature > 0.0
-        step = self.batch_size or len(prompts) or 1
         outs: list[str] = []
-        for i in range(0, len(prompts), step):
-            texts = [self._format(p) for p in prompts[i:i + step]]
-            enc = self.tok(texts, return_tensors="pt", padding=True, add_special_tokens=False)
-            enc = {k: v.to(self.model.device) for k, v in enc.items()}
-            with torch.no_grad():
-                out = self.model.generate(
-                    **enc,
-                    do_sample=do_sample,
-                    temperature=temperature if do_sample else None,
-                    top_p=1.0,
-                    max_new_tokens=max_new_tokens,
-                    pad_token_id=self.tok.pad_token_id or self.tok.eos_token_id,
-                )
-            gen = out[:, enc["input_ids"].shape[1]:]
-            outs.extend(self.tok.batch_decode(gen, skip_special_tokens=True))
-            del enc, out, gen
+        for lo, hi in chunk_bounds(len(prompts), self.batch_size):
+            outs.extend(self.generate_batch(prompts[lo:hi], temperature=temperature,
+                                            max_new_tokens=max_new_tokens))
         return outs
 
 

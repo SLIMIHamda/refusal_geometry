@@ -13,6 +13,7 @@ Two things must hold, and only one of them needs a GPU:
 import pytest
 
 from asw.harness.cli import _batch_size, _build_generator
+from asw.harness.generate import chunk_bounds
 
 try:
     import torch
@@ -68,6 +69,41 @@ def test_wrapper_passes_its_batch_size_to_its_own_generator(tmp_path):
     d = {13: np.ones(8)}
     w = Wrapper(None, None, d, {13: "raw_add"}, 8.0, batch_size=4)
     assert w.batch_size == 4
+
+
+# ── chunk/mask alignment (no torch needed) ────────────────────────────────────
+# The regression this guards: generation was chunked while the wrapper's per-row condition mask
+# stayed whole-batch, so the steering hook met 16 hidden states and a 100-long mask and died with
+# "The size of tensor a (16) must match the size of tensor b (100)". `cast` and `wrapper` are
+# gated and hit it; `abliteration` passes mask=None and broadcast, which is why it survived.
+def test_chunk_bounds_cover_every_index_exactly_once():
+    for n, step in [(100, 16), (10, 3), (7, 7), (5, 8), (1, 16), (16, 16)]:
+        bounds = chunk_bounds(n, step)
+        covered = [i for lo, hi in bounds for i in range(lo, hi)]
+        assert covered == list(range(n)), (n, step)
+
+
+def test_chunk_bounds_edge_cases():
+    assert chunk_bounds(0, 16) == []            # empty prompt list -> no batches at all
+    assert chunk_bounds(5, None) == [(0, 5)]    # batch_size=None -> one batch
+    assert chunk_bounds(100, 16)[-1] == (96, 100)
+
+
+def test_mask_slice_always_matches_its_prompt_chunk():
+    """THE invariant. A mask slice shorter or longer than its batch is the crash."""
+    for n, step in [(100, 16), (10, 3), (7, 7), (5, 8), (1, 16)]:
+        prompts = list(range(n))
+        mask = [i % 2 == 0 for i in range(n)]
+        for lo, hi in chunk_bounds(n, step):
+            assert len(mask[lo:hi]) == len(prompts[lo:hi]) > 0, (n, step, lo, hi)
+
+
+def test_mask_slices_keep_each_prompt_with_its_own_flag():
+    """Alignment, not just length: row i of a batch must carry prompt i's decision."""
+    n, step = 100, 16
+    mask = [i % 3 == 0 for i in range(n)]
+    rebuilt = [flag for lo, hi in chunk_bounds(n, step) for flag in mask[lo:hi]]
+    assert rebuilt == mask
 
 
 # ── behaviour (needs torch; runs on the GPU host) ─────────────────────────────
@@ -145,3 +181,52 @@ def test_empty_prompt_list_does_not_call_the_model():
     g = _gen(4)
     assert g.generate([], temperature=0.0, max_new_tokens=1, seed=0) == []
     assert g.model.calls == []
+
+
+@requires_torch
+def test_gated_wrapper_generates_in_chunks_without_a_mask_shape_error(monkeypatch):
+    """End-to-end reproduction of the crash: a gated wrapper over more prompts than one batch.
+
+    Before the fix this raised "The size of tensor a (16) must match the size of tensor b (100)"
+    from the steering hook, because the mask covered all prompts while `h` was one chunk."""
+    import numpy as np
+
+    from asw.wrapper.wrapper import Wrapper
+
+    n, bs = 100, 16
+    prompts = [f"{'x' * (i % 5)}p{i}" for i in range(n)]
+
+    # _mask does `from ..geometry.extract import capture_terminal` INSIDE the method, so the
+    # patch has to land on the source module — patching the wrapper's namespace would be a no-op.
+    monkeypatch.setattr(
+        "asw.geometry.extract.capture_terminal",
+        lambda model, tok, ps, layers, **kw: {layers[0]: np.arange(len(ps), dtype=float)[:, None]})
+
+    class _Cond:                     # flags alternating rows, so the mask is genuinely mixed
+        def predict(self, acts):
+            return np.asarray(acts).ravel() % 2 == 0
+
+    seen = []
+
+    class _RecordingSteer:
+        """Stands in for WrapperSteer to record the mask each chunk actually receives."""
+
+        def __init__(self, model, d_by_layer, branch_by_layer, alpha, mask=None, site="block"):
+            seen.append(None if mask is None else len(mask))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr("asw.wrapper.steer.WrapperSteer", _RecordingSteer)
+
+    w = Wrapper(_Model(), _Tok(), {13: np.ones(4)}, {13: "raw_add"}, 8.0,
+                condition=_Cond(), condition_layer=13, batch_size=bs)
+    outs = w.generate(prompts, temperature=0.0, max_new_tokens=1, seed=0)
+
+    assert len(outs) == n
+    # every chunk's mask matches that chunk's batch — the shape error was 100 against 16
+    assert seen == [16] * 6 + [4]
+    assert w.model.calls == [16] * 6 + [4]
