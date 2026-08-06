@@ -306,6 +306,32 @@ def _batch_size(cfg):
     return (cfg.get("decoding") or {}).get("batch_size", 16)
 
 
+def _apply_decoding(cfg, args):
+    """Fold --max-new-tokens / --temperatures / --batch-size into cfg['decoding'].
+
+    Applied before anything hashes the config, so a run at max_new_tokens=128 gets its own
+    run_id and never pools with a 256-token one. These dominate wall clock: a steered model
+    that stops emitting EOS runs to max_new_tokens on every prompt, and each extra temperature
+    is a full second pass over the benchmark."""
+    dec = dict(cfg.get("decoding") or {})
+    if getattr(args, "max_new_tokens", None) is not None:
+        dec["max_new_tokens"] = args.max_new_tokens
+    if getattr(args, "temperatures", None):
+        dec["temperatures"] = list(args.temperatures)
+    if getattr(args, "batch_size", None) is not None:
+        dec["batch_size"] = args.batch_size
+    return {**cfg, "decoding": dec}
+
+
+def _add_decoding_args(p):
+    p.add_argument("--max-new-tokens", type=int, default=None,
+                   help="override decoding.max_new_tokens (biggest wall-clock lever)")
+    p.add_argument("--temperatures", type=float, nargs="*", default=None,
+                   help="override decoding.temperatures; one value halves a two-temp run")
+    p.add_argument("--batch-size", type=int, default=None,
+                   help="override decoding.batch_size (VRAM bound; lower this on OOM)")
+
+
 def _build_generator(cfg, model, tok, defense, alpha, force_op=None):
     """Construct the Generator for a chosen defense, loading cached artifacts as needed."""
     from .generate import HFGenerator
@@ -397,7 +423,7 @@ def _eval(args) -> int:
     from ..scorers.judge import HFClassifierJudge, RubricJudge
     from .evaluate import evaluate_benchmark
 
-    cfg = load_config(args.config)
+    cfg = _apply_decoding(load_config(args.config), args)
     con = dbm.connect(cfg["paths"]["results_db"])
     bench = load_benchmark(args.benchmark, data_dir=cfg["paths"]["data_dir"], limit=args.limit)
     model, tok = load_model(cfg, quant=args.quant)
@@ -449,7 +475,7 @@ def _ablate(args) -> int:
     from ..scorers.judge import HFClassifierJudge, RubricJudge
     from .evaluate import evaluate_benchmark
 
-    cfg = load_config(args.config)
+    cfg = _apply_decoding(load_config(args.config), args)
     con = dbm.connect(cfg["paths"]["results_db"])
     bench = load_benchmark(args.benchmark, data_dir=cfg["paths"]["data_dir"], limit=args.limit)
     dp = _drefuse_path(cfg)
@@ -726,6 +752,7 @@ def main(argv=None) -> int:
     ev.add_argument("--hf-judge", action="store_true")
     ev.add_argument("--force-alpha", action="store_true",
                     help="silence the pre-registered-alpha mismatch warning (Item 3)")
+    _add_decoding_args(ev)
     ev.set_defaults(func=_eval)
 
     ab = sub.add_parser("ablate", help="sweep one wrapper ablation axis (C4 ablations)")
@@ -744,6 +771,7 @@ def main(argv=None) -> int:
     ab.add_argument("--limit", type=int, default=None)
     ab.add_argument("--seeds", type=int, nargs="*", default=None)
     ab.add_argument("--hf-judge", action="store_true")
+    _add_decoding_args(ab)
     ab.set_defaults(func=_ablate)
 
     at = sub.add_parser("attack", help="adversarial robustness suite vs a defense (C5, Item 6)")

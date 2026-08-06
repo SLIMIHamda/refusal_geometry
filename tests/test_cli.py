@@ -128,3 +128,50 @@ def test_attack_cli_rejects_unknown_attack():
 
     with pytest.raises(SystemExit):        # argparse rejects a bad --attack choice
         cli.main(["attack", "--config", "c.yaml", "--attack", "nope"])
+
+
+# ── decoding overrides (the two biggest wall-clock levers) ────────────────────
+def _dargs(**kw):
+    import argparse
+
+    return argparse.Namespace(**{"max_new_tokens": None, "temperatures": None,
+                                 "batch_size": None, **kw})
+
+
+def _dcfg():
+    return {"decoding": {"temperatures": [0.0, 0.7], "max_new_tokens": 256,
+                         "top_p": 1.0, "batch_size": 16}}
+
+
+def test_apply_decoding_is_a_noop_without_flags():
+    from asw.harness.cli import _apply_decoding
+
+    assert _apply_decoding(_dcfg(), _dargs())["decoding"] == _dcfg()["decoding"]
+
+
+def test_apply_decoding_overrides_only_what_was_passed():
+    from asw.harness.cli import _apply_decoding
+
+    dec = _apply_decoding(_dcfg(), _dargs(max_new_tokens=128, temperatures=[0.0]))["decoding"]
+    assert dec["max_new_tokens"] == 128
+    assert dec["temperatures"] == [0.0]
+    assert dec["batch_size"] == 16      # untouched keys survive
+    assert dec["top_p"] == 1.0
+
+
+def test_apply_decoding_changes_the_config_hash():
+    """A 128-token run must get its own run_id, or it pools with the 256-token one."""
+    from asw.config import config_hash
+    from asw.harness.cli import _apply_decoding
+
+    base = _apply_decoding(_dcfg(), _dargs())
+    fast = _apply_decoding(_dcfg(), _dargs(max_new_tokens=128))
+    assert config_hash(base) != config_hash(fast)
+
+
+def test_apply_decoding_does_not_mutate_the_caller_config():
+    from asw.harness.cli import _apply_decoding
+
+    cfg = _dcfg()
+    _apply_decoding(cfg, _dargs(max_new_tokens=128, batch_size=4))
+    assert cfg["decoding"]["max_new_tokens"] == 256 and cfg["decoding"]["batch_size"] == 16
