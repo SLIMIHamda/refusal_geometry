@@ -10,6 +10,7 @@ session re-derives the same id and `run_exists(..., done=True)` skips finished u
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -53,7 +54,8 @@ CREATE TABLE IF NOT EXISTS runs (
     status               TEXT,
     error                TEXT,
     metrics_json         TEXT,
-    notes                TEXT
+    notes                TEXT,
+    scorer_version       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_lookup
     ON runs(experiment, model_id, config_hash, seed);
@@ -71,11 +73,45 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
+    _ensure_columns(con)
     return con
 
 
 def _columns(con: sqlite3.Connection) -> list[str]:
     return [r[1] for r in con.execute("PRAGMA table_info(runs)").fetchall()]
+
+
+def _ensure_columns(con: sqlite3.Connection) -> None:
+    """Additive migration for columns introduced after a DB was first created — SCHEMA's
+    `CREATE TABLE IF NOT EXISTS` will not alter an existing table. Idempotent; never drops or
+    rewrites, so it cannot disturb config_hash or existing rows."""
+    have = set(_columns(con))
+    for col, decl in (("scorer_version", "TEXT"),):
+        if col not in have:
+            con.execute(f"ALTER TABLE runs ADD COLUMN {col} {decl}")
+    con.commit()
+
+
+def backfill_scorer_version(con: sqlite3.Connection) -> int:
+    """Populate `scorer_version` from the notes provenance stamp wherever it is still NULL — for
+    runs re-scored (stamped) before the column existed. Non-eval runs (extract/geometry-map/
+    fit-condition) carry no `marker_set_version` in notes, so they are correctly left NULL.
+    Returns the number of rows updated."""
+    rows = con.execute(
+        "SELECT run_id, notes FROM runs WHERE scorer_version IS NULL AND notes IS NOT NULL"
+    ).fetchall()
+    n = 0
+    for r in rows:
+        try:
+            v = json.loads(r["notes"]).get("marker_set_version")
+        except (ValueError, TypeError, AttributeError):
+            v = None
+        if v:
+            con.execute("UPDATE runs SET scorer_version=? WHERE run_id=?", (v, r["run_id"]))
+            n += 1
+    if n:
+        con.commit()
+    return n
 
 
 def run_exists(con: sqlite3.Connection, run_id: str, done: bool = False) -> bool:

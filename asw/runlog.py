@@ -77,5 +77,9 @@ def run_context(
         record["ended_at"] = _now()
         record["wall_clock_s"] = round(time.time() - t0, 3)
         record["metrics_json"] = json.dumps(handle["metrics"], sort_keys=True)
+        # scorer identity is orthogonal to config_hash: callers that score refusal (eval) set
+        # handle["scorer_version"]; extract/geometry-map/fit-condition don't, so it stays NULL.
+        if handle.get("scorer_version") is not None:
+            record["scorer_version"] = handle["scorer_version"]
         record["peak_vram_mb"] = _peak_vram_mb()
         dbm.upsert_run(con, record)
