@@ -25,3 +25,8 @@ venv/
 
 # keep configs tracked
 !configs/**
+
+# local research data / notebooks (kept locally, not version-controlled)
+results_POC_notebook/
+master_thesis_notebooks/
+Results Analysis.docx
