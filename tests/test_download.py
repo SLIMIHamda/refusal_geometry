@@ -21,6 +21,18 @@ def test_specs_cover_core_axes():
         assert name in SPECS and "prompt" in SPECS[name]
 
 
+def test_xstest_excludes_unsafe_contrast_prompts():
+    # XSTest ships safe + 'contrast' unsafe prompts in one split; only the safe half is a valid
+    # over-refusal denominator, so the unsafe half must be dropped at download time.
+    exclude = SPECS["xstest"]["exclude"]
+    assert exclude({"type": "contrast_homonyms"}) is True
+    assert exclude({"type": "contrast_privacy_fictional"}) is True
+    assert exclude({"label": "unsafe"}) is True          # mirrors carrying an explicit label
+    assert exclude({"type": "homonyms"}) is False
+    assert exclude({"type": "safe_contexts"}) is False
+    assert exclude({}) is False                          # unknown schema -> keep, and warn loudly
+
+
 def test_write_jsonl_roundtrip(tmp_path):
     from asw.data.benchmarks import from_jsonl
 
