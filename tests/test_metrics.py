@@ -52,6 +52,31 @@ def test_select_alpha_maximizes_margin_ties_to_smaller():
     assert M.select_alpha([]) is None
 
 
+def test_cluster_bootstrap_boundary_uses_exact_interval():
+    import pandas as pd
+
+    # The headline-table failure mode: 100 prompts, none refused. A percentile bootstrap of an
+    # all-zero vector has no spread, so it reports [0,0] — certainty no n can license. The exact
+    # cluster-level interval must be returned instead (CP upper bound ~3.6% at n=100).
+    zero = pd.DataFrame({"prompt_id": [f"p{i}" for i in range(100)], "refused": [0] * 100})
+    r, lo, hi, n = M.cluster_bootstrap_rate_ci(zero)
+    assert n == 100 and r == 0.0 and lo == 0.0
+    assert 0.03 < hi < 0.05, "0% must carry a real upper bound, not collapse to [0,0]"
+    _, cp_lo, cp_hi = M.refusal_rate_ci(0, 100)
+    assert abs(hi - cp_hi) < 1e-9                       # exactly the Clopper-Pearson bound
+
+    # symmetric at the top boundary
+    ones = pd.DataFrame({"prompt_id": [f"p{i}" for i in range(100)], "refused": [1] * 100})
+    r, lo, hi, n = M.cluster_bootstrap_rate_ci(ones)
+    assert r == 1.0 and hi == 1.0 and 0.95 < lo < 0.97
+
+    # an interior rate still uses the bootstrap (clustering, not exactness, is the point there)
+    mixed = pd.DataFrame({"prompt_id": [f"p{i}" for i in range(100)],
+                          "refused": [1] * 30 + [0] * 70})
+    r, lo, hi, n = M.cluster_bootstrap_rate_ci(mixed, B=2000, seed=0)
+    assert abs(r - 0.30) < 1e-9 and lo < 0.30 < hi and (hi - lo) > 0.05
+
+
 def test_cluster_bootstrap_degenerate_cases():
     import pandas as pd
 

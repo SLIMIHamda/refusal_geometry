@@ -78,7 +78,15 @@ def cluster_bootstrap_rate_ci(df, *, cluster: str = "prompt_id", value: str = "r
     all replicates of the sampled clusters. Responses to the SAME prompt across seeds/temps are
     correlated (at T=0 they are identical), so pooling replicates as independent Bernoulli trials
     inflates n and understates the interval — this is the honest CI. Degrades gracefully: one
-    cluster -> lo=hi=rate; it also matches an ordinary bootstrap when there is one row per prompt."""
+    cluster -> lo=hi=rate; it also matches an ordinary bootstrap when there is one row per prompt.
+
+    BOUNDARY CASE (rate 0 or 1, >=2 clusters): every resample of an all-zero (or all-one) vector
+    returns the same value, so the percentile bootstrap collapses to a ZERO-WIDTH interval — it
+    reports [0,0] for a 0% rate, which asserts certainty no sample size can license. That is a
+    structural property of resampling, not a fixable bootstrap parameter, so we fall back to an
+    exact Clopper-Pearson interval on the CLUSTER counts (the independent units): 0/100 prompts
+    -> [0.0, 0.036], not [0.0, 0.0]. This is the "0.0% is a hypothesis, not a result" rule from
+    the module docstring, applied to the clustered path that the headline table actually uses."""
     if df is None or len(df) == 0:
         return float("nan"), float("nan"), float("nan"), 0
     g = df.groupby(cluster)[value]
@@ -89,6 +97,11 @@ def cluster_bootstrap_rate_ci(df, *, cluster: str = "prompt_id", value: str = "r
         return float("nan"), float("nan"), float("nan"), 0
     rate = float(sums.sum() / total)
     n_clusters = sums.size
+    # boundary: the bootstrap has no spread to find here — use the exact interval instead
+    if n_clusters >= 2 and (rate <= 0.0 or rate >= 1.0):
+        k_clusters = n_clusters if rate >= 1.0 else 0
+        lo, hi = clopper_pearson(k_clusters, n_clusters, alpha)
+        return rate, float(lo), float(hi), int(n_clusters)
     rng = np.random.default_rng(seed)
     idx = rng.integers(0, n_clusters, size=(B, n_clusters))
     boots = sums[idx].sum(axis=1) / counts[idx].sum(axis=1)
