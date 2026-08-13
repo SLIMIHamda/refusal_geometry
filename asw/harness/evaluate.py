@@ -67,6 +67,11 @@ def evaluate_benchmark(
 
         metrics = _summarize(rows, list(judges), decoding["temperatures"], benchmark.task)
         h["metrics"] = metrics
+        # tag the run with the rubric marker-set identity so the report never pools numbers from
+        # different scorers under an unchanged config_hash (Review B provenance/correctness).
+        from ..scorers.refusal import marker_set_version
+
+        h["scorer_version"] = marker_set_version()
     return metrics
 
 

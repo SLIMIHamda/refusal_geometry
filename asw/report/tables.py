@@ -14,6 +14,23 @@ def _empty(cols):
     return pd.DataFrame(columns=cols)
 
 
+def _assert_single_scorer(g, ctx: str) -> None:
+    """Fail loudly if a pooled group mixes scorer versions. The report groups by
+    (model, benchmark, defense) / (benchmark, point) and intentionally does NOT key on config_hash,
+    so numbers scored by different marker sets would otherwise combine silently (Review B). A group
+    that is uniformly unversioned (all NULL — a legacy DB) counts as one scorer and is allowed."""
+    if "scorer_version" not in g.columns:
+        return
+    vers = {(v if isinstance(v, str) and v else None) for v in g["scorer_version"]}
+    if len(vers) > 1:
+        shown = sorted(str(v) for v in vers)
+        raise ValueError(
+            f"scorer_version conflict in {ctx}: pooled runs were scored by different scorers "
+            f"({shown}). Re-score the group to one version "
+            f"(`python scripts/rescore_runs.py --results-dir <dir> --write`) or filter the manifest "
+            f"before reporting — config_hash is intentionally not used to separate scorers.")
+
+
 def _pool(group):
     """Pool k/n across a group -> (rate, lo, hi, n)."""
     from ..eval import metrics as M
@@ -54,12 +71,14 @@ def table_refusal(runs, *, judge: str = "rubric", temperature=0.0, results_dir=N
                          "defense": r["defense"], "seed": r["seed"], "k": m["k"], "n": m["n"],
                          "k_deg": fl.get("k"), "n_deg": fl.get("n"),
                          "k_fluent": flu.get("k"), "n_fluent": flu.get("n"),
+                         "scorer_version": r.get("scorer_version"),
                          "experiment": r["experiment"], "run_id": r["run_id"]})
     if not rows:
         return _empty(cols)
     df = pd.DataFrame(rows)
     out = []
     for (mid, bench, defn), g in df.groupby(["model_id", "benchmark", "defense"]):
+        _assert_single_scorer(g, f"{mid}/{bench}/{defn} [{judge}]")
         p, lo, hi, n = _group_ci(g, results_dir, judge=judge, temperature=temperature)
         deg, fluent = _degeneracy(g, results_dir, judge=judge, temperature=temperature)
         out.append({"model_id": mid, "benchmark": bench, "defense": defn,
@@ -201,12 +220,14 @@ def table_ablation(runs, axis: str, *, judge: str = "rubric", temperature=0.0):
         m = r["metrics"].get(key)
         if m:
             rows.append({"benchmark": r["benchmark"], "point": r["tag"][len(prefix):],
-                         "seed": r["seed"], "k": m["k"], "n": m["n"]})
+                         "seed": r["seed"], "k": m["k"], "n": m["n"],
+                         "scorer_version": r.get("scorer_version")})
     if not rows:
         return _empty(cols)
     df = pd.DataFrame(rows)
     out = []
     for (bench, point), g in df.groupby(["benchmark", "point"]):
+        _assert_single_scorer(g, f"ablate-{axis} {bench}/{point} [{judge}]")
         p, lo, hi, n = _pool(g)
         out.append({"benchmark": bench, "point": point, "refusal_rate": p,
                     "ci_lo": lo, "ci_hi": hi, "n": n})

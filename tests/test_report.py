@@ -138,6 +138,52 @@ def test_table_refusal_clusters_when_parquet_present(tmp_path):
     assert (clustered["ci_hi"] - clustered["ci_lo"]) > (pooled["ci_hi"] - pooled["ci_lo"])
 
 
+def _add_eval(con, run_id, experiment, defense, k, n, *, seed=0, scorer_version=None,
+              config=None):
+    dbm.upsert_run(con, {"run_id": run_id, "experiment": experiment, "model_id": "A", "seed": seed,
+                         "status": "completed", "started_at": "2026-01-01",
+                         "config_json": json.dumps(config or {"defense": {"kind": defense}}),
+                         "metrics_json": json.dumps(_em(k / n, k, n)),
+                         "scorer_version": scorer_version})
+
+
+def test_table_refusal_fails_loudly_on_mixed_scorer_version(tmp_path):
+    # Two seeds of the same (model, benchmark, defense) scored by DIFFERENT marker sets must never
+    # pool silently — the report keys on scorer_version, not config_hash.
+    con = dbm.connect(tmp_path / "r.sqlite")
+    _add_eval(con, "old", "eval:harmbench", "none", 6, 20, seed=0, scorer_version="aaaa1111")
+    _add_eval(con, "new", "eval:harmbench", "none", 6, 20, seed=1, scorer_version="bbbb2222")
+    with pytest.raises(ValueError, match="scorer_version conflict"):
+        tables.table_refusal(load_runs(tmp_path / "r.sqlite"))
+
+
+def test_table_refusal_pools_within_one_scorer_version(tmp_path):
+    con = dbm.connect(tmp_path / "r.sqlite")
+    _add_eval(con, "s0", "eval:harmbench", "none", 6, 20, seed=0, scorer_version="same999")
+    _add_eval(con, "s1", "eval:harmbench", "none", 6, 20, seed=1, scorer_version="same999")
+    t = tables.table_refusal(load_runs(tmp_path / "r.sqlite"))
+    assert t.iloc[0]["n"] == 40 and t.iloc[0]["seeds"] == 2      # one scorer -> pools cleanly
+
+
+def test_table_refusal_legacy_all_null_scorer_pools(tmp_path):
+    # A pre-versioning DB (scorer_version all NULL) is uniform, so it must still pool, not raise.
+    con = dbm.connect(tmp_path / "r.sqlite")
+    _add_eval(con, "n0", "eval:harmbench", "none", 6, 20, seed=0)   # scorer_version defaults NULL
+    _add_eval(con, "n1", "eval:harmbench", "none", 6, 20, seed=1)
+    assert tables.table_refusal(load_runs(tmp_path / "r.sqlite")).iloc[0]["n"] == 40
+
+
+def test_table_ablation_fails_loudly_on_mixed_scorer_version(tmp_path):
+    con = dbm.connect(tmp_path / "r.sqlite")
+    cfg = {"ablation": {"axis": "alpha", "point": "alpha=2"}}
+    _add_eval(con, "abx", "eval:advbench:ablate-alpha:alpha=2", "none", 10, 20,
+              scorer_version="aaaa1111", config=cfg)
+    _add_eval(con, "aby", "eval:advbench:ablate-alpha:alpha=2", "none", 12, 20, seed=1,
+              scorer_version="bbbb2222", config=cfg)
+    with pytest.raises(ValueError, match="scorer_version conflict"):
+        tables.table_ablation(load_runs(tmp_path / "r.sqlite"), "alpha")
+
+
 def test_table_geometry(tmp_path):
     g = tables.table_geometry(load_runs(_seed(tmp_path / "r.sqlite")))
     assert list(g["layer"]) == [13, 14] and set(g["label"]) == {"anti-aligned"}

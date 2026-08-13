@@ -254,6 +254,8 @@ def _validate_drefuse(args) -> int:
     from ..scorers.judge import RubricJudge
 
     cfg = load_config(args.config)
+    if args.max_new_tokens is not None:
+        cfg = {**cfg, "decoding": {**cfg["decoding"], "max_new_tokens": args.max_new_tokens}}
     con = dbm.connect(cfg["paths"]["results_db"])
     dp = _drefuse_path(cfg)
     if not dp.exists():
@@ -729,6 +731,9 @@ def main(argv=None) -> int:
     vd.add_argument("--benign", default="orbench", help="harmless set for the naive-DIM contrast")
     vd.add_argument("--layers", type=int, nargs="*", default=None)
     vd.add_argument("--quant", default=None, choices=[None, "int8", "nf4"])
+    vd.add_argument("--max-new-tokens", type=int, default=None,
+                    help="override decoding.max_new_tokens; validate only classifies refusal (the "
+                         "rubric reads ~80 tokens), so a small value cuts the ~500-generation cost")
     vd.set_defaults(func=_validate_drefuse)
 
     mv = sub.add_parser("models-verify", help="load a model and check T=0 determinism (M1)")
