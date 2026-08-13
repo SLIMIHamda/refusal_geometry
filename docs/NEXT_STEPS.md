@@ -113,7 +113,41 @@ it will not resolve this.
 - Stage 14 bundles everything and refuses to write a partial zip. Ignore any older
   bundling command in chat history.
 - `cache/geometry/` goes stale whenever `d_refuse` changes. Delete both together.
-- Old runs pool with new ones in the report table, since it groups by defense without
-  filtering on config hash. Archive `results/` before a fresh pass.
 - Deterministic: greedy decoding at seed 0 reproduced byte-identical output across two
   runs three days apart.
+
+## Results hygiene & scorer_version
+
+Two things update on Kaggle by *different* routes:
+
+- **Library + scripts** (`asw/`, `scripts/`) update automatically via cell 2's `git pull`. So a
+  fresh eval immediately scores with the new markers and stamps `scorer_version` — you do **not**
+  need the new notebook for the scorer fix to take effect.
+- **The notebook cells themselves** (Stage 6b, the `VALIDATE_CONFIG`/`RUN_VALIDATE_DREFUSE`
+  toggles, the `hf_access_ok` helper) do **not** auto-update — Kaggle runs its own saved copy, and
+  the pull only refreshes the on-disk file, not the running notebook. Re-import the merged
+  `.ipynb` to get them.
+
+**The pooling guard.** `asw report` now *fails loudly* if a pooled group mixes `scorer_version`s —
+`(model, benchmark, defense)` for the main table, `(benchmark, point)` for ablation. It does not
+object to old and new runs merely coexisting in `runs.sqlite`; only to averaging two scorers into
+one number. Scope:
+
+- A **complete re-run** overwrites each unit (there is no skip-if-done guard on `asw eval`), so
+  `results/` ends up uniformly new-scorer — nothing to clean up.
+- The guard trips on **orphaned old runs** — config drift under one defense, or a dropped seed —
+  that share a group with new ones. This is the "old runs pool with new" hazard, now caught rather
+  than silently averaged.
+
+Keeping old and new apart (all config-path-driven, so fully within repo standards):
+
+- **Retire old:** archive `results/` → `results_archive_YYYYMM/` before a fresh pass.
+- **Keep both live:** point the pass at its own `paths.results_db` / `paths.results_dir`.
+- **Unify + correct (preferred for the paper):** `python scripts/rescore_runs.py --results-dir
+  results --write` — CPU-only, needs the parquets. Re-scores in place, backfills `scorer_version`
+  on legacy rows via the additive migration, and stamps provenance. The old numbers were
+  *undercounted* by the buggy scorer, so quarantining them keeps the wrong values; re-scoring fixes
+  them and keeps a single manifest.
+
+`extract` / `geometry-map` / `fit-condition` carry no refusal metric, so `scorer_version` stays
+NULL for them and they never trip the guard.
